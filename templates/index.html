@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AC3 v2 — Encrypt &amp; Decrypt</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --err: #f85149;
+    --mono: "Cascadia Code", "Fira Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 28px 24px 8px; text-align: center;
+  }
+  header h1 { margin: 0; font-size: 1.7rem; letter-spacing: .5px; }
+  header h1 span { color: var(--accent); }
+  header p { color: var(--muted); margin: 8px 0 0; font-size: .95rem; }
+  main {
+    max-width: 860px; margin: 24px auto; padding: 0 16px 48px;
+    display: grid; gap: 20px;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px;
+  }
+  .card h2 { margin: 0 0 14px; font-size: 1.05rem; }
+  .card h2 .tag {
+    font-size: .7rem; color: var(--muted); font-weight: normal;
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 2px 8px; margin-left: 8px; vertical-align: middle;
+  }
+  textarea {
+    width: 100%; min-height: 110px; resize: vertical;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px; font-family: var(--mono); font-size: .9rem;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: var(--accent); color: #0d1117; border: none;
+    padding: 9px 18px; border-radius: 6px; font-weight: 600;
+    cursor: pointer; font-size: .9rem;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .5; cursor: wait; }
+  button.ghost {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+  .status { font-size: .85rem; min-height: 1.2em; }
+  .status.ok { color: var(--ok); }
+  .status.err { color: var(--err); }
+  .out {
+    margin-top: 14px; padding: 12px; border-radius: 6px;
+    background: var(--bg); border: 1px dashed var(--border);
+    font-family: var(--mono); font-size: .85rem;
+    word-break: break-all; white-space: pre-wrap; max-height: 260px;
+    overflow-y: auto;
+  }
+  .out:empty { display: none; }
+  input[type="file"] { color: var(--muted); font-size: .9rem; max-width: 100%; }
+  .file-result { margin-top: 12px; font-size: .9rem; }
+  .file-result a { color: var(--ok); font-weight: 600; }
+  footer {
+    text-align: center; color: var(--muted); font-size: .8rem;
+    padding: 0 16px 32px;
+  }
+  footer code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>AC3</span> v2 — Layered Encryption</h1>
+  <p>5-layer pipeline: framing → byte Caesar → XOR → transposition → HMAC-SHA256</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Text <span class="tag">AES-style envelope: AC3v2.…</span></h2>
+    <textarea id="plain" placeholder="Type a message to encrypt…"></textarea>
+    <div class="row">
+      <button id="btn-enc">Encrypt →</button>
+      <button id="btn-dec" class="ghost">← Decrypt</button>
+      <button id="btn-swap" class="ghost">Swap ↓↑</button>
+      <button id="btn-copy" class="ghost">Copy</button>
+      <button id="btn-clear" class="ghost">Clear</button>
+      <span id="status" class="status"></span>
+    </div>
+    <div id="output" class="out"></div>
+  </section>
+
+  <section class="card">
+    <h2>Files <span class="tag">up to 64 MB</span></h2>
+    <div class="row">
+      <input type="file" id="file-input">
+      <button id="btn-fenc">Encrypt file</button>
+      <button id="btn-fdec" class="ghost">Decrypt file</button>
+      <span id="fstatus" class="status"></span>
+    </div>
+    <div id="fresult" class="file-result"></div>
+  </section>
+</main>
+
+<footer>
+  Keys are derived per message via HKDF-SHA256; every message gets a fresh
+  random nonce. Keys live in <code>.env</code> — never in source control.
+</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const setStatus = (el, msg, ok) => {
+  el.textContent = msg || "";
+  el.className = "status " + (ok === true ? "ok" : ok === false ? "err" : "");
+};
+
+async function postJSON(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+async function encryptText() {
+  const text = $("plain").value;
+  if (!text) return setStatus($("status"), "Enter a message first.", false);
+  $("btn-enc").disabled = true;
+  try {
+    const { ciphertext } = await postJSON("/encrypt", { message: text });
+    $("output").textContent = ciphertext;
+    setStatus($("status"), `Encrypted ✓ (${ciphertext.length} chars)`, true);
+  } catch (e) {
+    setStatus($("status"), e.message, false);
+  } finally {
+    $("btn-enc").disabled = false;
+  }
+}
+
+async function decryptText() {
+  const token = $("plain").value.trim();
+  if (!token) return setStatus($("status"), "Paste a ciphertext first.", false);
+  $("btn-dec").disabled = true;
+  try {
+    const { plaintext } = await postJSON("/decrypt", { ciphertext: token });
+    $("output").textContent = plaintext;
+    setStatus($("status"), "Decrypted ✓", true);
+  } catch (e) {
+    setStatus($("status"), e.message, false);
+  } finally {
+    $("btn-dec").disabled = false;
+  }
+}
+
+function swap() {
+  const out = $("output").textContent;
+  if (!out) return;
+  $("plain").value = out;
+  $("output").textContent = "";
+  setStatus($("status"), "Moved to input.");
+}
+
+async function copyOut() {
+  const out = $("output").textContent;
+  if (!out) return;
+  try {
+    await navigator.clipboard.writeText(out);
+    setStatus($("status"), "Copied ✓", true);
+  } catch {
+    setStatus($("status"), "Clipboard blocked by browser.", false);
+  }
+}
+
+function clearAll() {
+  $("plain").value = "";
+  $("output").textContent = "";
+  setStatus($("status"), "");
+}
+
+async function fileOp(action, button) {
+  const input = $("file-input");
+  const file = input.files[0];
+  if (!file) return setStatus($("fstatus"), "Choose a file first.", false);
+  button.disabled = true;
+  setStatus($("fstatus"), `${action === "encrypt-file" ? "Encrypting" : "Decrypting"}…`);
+  $("fresult").innerHTML = "";
+  try {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const res = await fetch("/" + action, { method: "POST", body: form });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Request failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="?([^";]+)"?/);
+    const name = match ? match[1] : (action === "encrypt-file" ? file.name + ".ac3" : file.name);
+    const url = URL.createObjectURL(blob);
+    $("fresult").innerHTML =
+      `Done ✓ <a download="${name}" href="${url}">Download ${name}</a> ` +
+      `(${blob.size.toLocaleString()} bytes)`;
+    setStatus($("fstatus"), "", true);
+  } catch (e) {
+    setStatus($("fstatus"), e.message, false);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("btn-enc").addEventListener("click", encryptText);
+$("btn-dec").addEventListener("click", decryptText);
+$("btn-swap").addEventListener("click", swap);
+$("btn-copy").addEventListener("click", copyOut);
+$("btn-clear").addEventListener("click", clearAll);
+$("btn-fenc").addEventListener("click", (e) => fileOp("encrypt-file", e.target));
+$("btn-fdec").addEventListener("click", (e) => fileOp("decrypt-file", e.target));
+</script>
+</body>
+</html>

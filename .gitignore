@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+
+# Runtime
+project_logs.log
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
