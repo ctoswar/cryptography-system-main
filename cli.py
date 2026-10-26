@@ -2,20 +2,26 @@
 """AC3 v2 command-line interface.
 
 Usage:
-    python cli.py encrypt "message"
-    python cli.py decrypt "AC3v2...."
-    python cli.py encrypt-file input.txt [output.ac3]
-    python cli.py decrypt-file input.ac3 [output.txt]
+    python cli.py encrypt "message" [--algorithm ac3|aes]
+    python cli.py decrypt "AC3v2...."        # auto-detects the algorithm
+    python cli.py encrypt-file input.txt [output.ac3] [--algorithm ac3|aes]
+    python cli.py decrypt-file input.ac3 [output.txt]   # auto-detects
     python cli.py keygen
 
 Reading '-' as the input makes encrypt/decrypt pipe-friendly:
     echo "secret" | python cli.py encrypt -
+
+Algorithms:
+    ac3  the five-layer thesis scheme (default; the project's identity)
+    aes  AES-256-GCM — the NIST standard; hardware-accelerated, streams
+         large files in constant memory (the high-volume path)
 """
 
 import argparse
 import sys
 
 from ac3 import AC3Error, CMainController
+from ac3.aesgcm import DEFAULT_CHUNK_SIZE
 from ac3.keys import DEFAULT_ENV_PATH, MASTER_KEY_ENV, KeyManager
 
 
@@ -44,7 +50,7 @@ def _build_controller(args) -> CMainController:
 
 def cmd_encrypt(args) -> int:
     controller = _build_controller(args)
-    token = controller.encrypt(_read_input(args.message))
+    token = controller.encrypt(_read_input(args.message), algorithm=args.algorithm)
     print(token)
     return 0
 
@@ -57,8 +63,10 @@ def cmd_decrypt(args) -> int:
 
 def cmd_encrypt_file(args) -> int:
     controller = _build_controller(args)
-    out = controller.encrypt_file(args.input, args.output)
-    print(f"Encrypted: {args.input} -> {out}")
+    out = controller.encrypt_file(
+        args.input, args.output, algorithm=args.algorithm, chunk_size=args.chunk_size
+    )
+    print(f"Encrypted ({args.algorithm}): {args.input} -> {out}")
     return 0
 
 
@@ -100,15 +108,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("encrypt", help="encrypt a text message", parents=[common])
     p.add_argument("message", help="plaintext, or '-' to read stdin")
+    p.add_argument(
+        "--algorithm",
+        choices=("ac3", "aes"),
+        default="ac3",
+        help="ac3 = five-layer thesis scheme (default); aes = AES-256-GCM standard",
+    )
     p.set_defaults(func=cmd_encrypt)
 
     p = sub.add_parser("decrypt", help="decrypt a ciphertext", parents=[common])
-    p.add_argument("message", help="AC3v2... token, or '-' to read stdin")
+    p.add_argument("message", help="AC3v2.../AC3A... token, or '-' to read stdin")
     p.set_defaults(func=cmd_decrypt)
 
     p = sub.add_parser("encrypt-file", help="encrypt a file", parents=[common])
     p.add_argument("input")
     p.add_argument("output", nargs="?", help="default: <input>.ac3")
+    p.add_argument(
+        "--algorithm",
+        choices=("ac3", "aes"),
+        default="ac3",
+        help="ac3 = five-layer (default); aes = AES-256-GCM streaming, best for large files",
+    )
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help=f"AES stream chunk size in bytes (default {DEFAULT_CHUNK_SIZE})",
+    )
     p.set_defaults(func=cmd_encrypt_file)
 
     p = sub.add_parser("decrypt-file", help="decrypt a .ac3 file", parents=[common])

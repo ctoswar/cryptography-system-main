@@ -68,6 +68,28 @@ def _validate_master_key(key_hex: str) -> bytes:
     return key
 
 
+def resolve_master_key(key_source) -> bytes:
+    """Normalize a key source (KeyManager | bytes | None) to a 32-byte key.
+
+    Shared by AC3Cipher and AESGCMCipher so both accept the same inputs.
+    """
+    if isinstance(key_source, KeyManager):
+        return key_source.master_key
+    if isinstance(key_source, (bytes, bytearray)):
+        master = bytes(key_source)
+        if len(master) != MASTER_KEY_BYTES:
+            raise InvalidKeyError(
+                f"Master key must be {MASTER_KEY_BYTES} bytes, got {len(master)}."
+            )
+        return master
+    if key_source is None:
+        return KeyManager().master_key
+    raise TypeError(
+        "key_source must be a KeyManager, bytes, or None; "
+        f"got {type(key_source).__name__}."
+    )
+
+
 class KeyManager:
     """Loads the master key from the environment/.env, creating it on first use."""
 

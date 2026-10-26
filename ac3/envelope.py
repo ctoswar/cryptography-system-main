@@ -42,21 +42,27 @@ def _b64d(text: str, what: str) -> bytes:
     return raw
 
 
-def encode_text(nonce: bytes, body: bytes, tag: bytes) -> str:
-    return f"{TEXT_PREFIX}{_b64e(nonce)}.{_b64e(body)}.{_b64e(tag)}"
+def encode_text(nonce: bytes, body: bytes, tag: bytes, *, prefix: str = TEXT_PREFIX) -> str:
+    return f"{prefix}{_b64e(nonce)}.{_b64e(body)}.{_b64e(tag)}"
 
 
-def decode_text(token: str):
-    if not isinstance(token, str) or not token.startswith(TEXT_PREFIX):
-        raise EnvelopeError("Ciphertext must start with 'AC3v2.'.")
-    parts = token[len(TEXT_PREFIX):].split(".")
+def decode_text(
+    token: str,
+    *,
+    prefix: str = TEXT_PREFIX,
+    nonce_size: int = NONCE_SIZE,
+    tag_size: int = TAG_SIZE,
+):
+    if not isinstance(token, str) or not token.startswith(prefix):
+        raise EnvelopeError(f"Ciphertext must start with '{prefix}'.")
+    parts = token[len(prefix):].split(".")
     if len(parts) != 3:
-        raise EnvelopeError("Ciphertext must have the form AC3v2.nonce.body.tag.")
+        raise EnvelopeError(f"Ciphertext must have the form {prefix}nonce.body.tag.")
     nonce, body, tag = (_b64d(part, name) for part, name in zip(parts, ("Nonce", "Body", "Tag")))
-    if len(nonce) != NONCE_SIZE:
-        raise EnvelopeError(f"Nonce must be {NONCE_SIZE} bytes.")
-    if len(tag) != TAG_SIZE:
-        raise EnvelopeError(f"Tag must be {TAG_SIZE} bytes.")
+    if len(nonce) != nonce_size:
+        raise EnvelopeError(f"Nonce must be {nonce_size} bytes.")
+    if len(tag) != tag_size:
+        raise EnvelopeError(f"Tag must be {tag_size} bytes.")
     return nonce, body, tag
 
 

@@ -75,6 +75,14 @@
   input[type="file"] { color: var(--muted); font-size: .9rem; max-width: 100%; }
   .file-result { margin-top: 12px; font-size: .9rem; }
   .file-result a { color: var(--ok); font-weight: 600; }
+  .alg-label {
+    font-size: .8rem; color: var(--muted); display: flex;
+    align-items: center; gap: 6px; white-space: nowrap;
+  }
+  select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 8px; font-size: .82rem; cursor: pointer;
+  }
   footer {
     text-align: center; color: var(--muted); font-size: .8rem;
     padding: 0 16px 32px;
@@ -85,14 +93,20 @@
 <body>
 <header>
   <h1><span>AC3</span> v2 — Layered Encryption</h1>
-  <p>5-layer pipeline: framing → byte Caesar → XOR → transposition → HMAC-SHA256</p>
+  <p>AC3 5-layer pipeline or standard AES-256-GCM — pick an algorithm below</p>
 </header>
 
 <main>
   <section class="card">
-    <h2>Text <span class="tag">AES-style envelope: AC3v2.…</span></h2>
+    <h2>Text <span class="tag">auto-detects AC3 vs AES on decrypt</span></h2>
     <textarea id="plain" placeholder="Type a message to encrypt…"></textarea>
     <div class="row">
+      <label class="alg-label">Algorithm
+        <select id="alg">
+          <option value="ac3" selected>AC3 — 5-layer thesis scheme</option>
+          <option value="aes">AES-256-GCM — standard</option>
+        </select>
+      </label>
       <button id="btn-enc">Encrypt →</button>
       <button id="btn-dec" class="ghost">← Decrypt</button>
       <button id="btn-swap" class="ghost">Swap ↓↑</button>
@@ -104,9 +118,15 @@
   </section>
 
   <section class="card">
-    <h2>Files <span class="tag">up to 64 MB</span></h2>
+    <h2>Files <span class="tag">up to 64 MB · AES streams in constant memory</span></h2>
     <div class="row">
       <input type="file" id="file-input">
+      <label class="alg-label">Algorithm
+        <select id="falg">
+          <option value="ac3" selected>AC3</option>
+          <option value="aes">AES-256-GCM (large files)</option>
+        </select>
+      </label>
       <button id="btn-fenc">Encrypt file</button>
       <button id="btn-fdec" class="ghost">Decrypt file</button>
       <span id="fstatus" class="status"></span>
@@ -118,6 +138,7 @@
 <footer>
   Keys are derived per message via HKDF-SHA256; every message gets a fresh
   random nonce. Keys live in <code>.env</code> — never in source control.
+  <br>AC3 = the 5-layer thesis scheme · AES = AES-256-GCM standard (streams large files).
 </footer>
 
 <script nonce="{{ csp_nonce }}">
@@ -144,9 +165,10 @@ async function encryptText() {
   if (!text) return setStatus($("status"), "Enter a message first.", false);
   $("btn-enc").disabled = true;
   try {
-    const { ciphertext } = await postJSON("/encrypt", { message: text });
+    const algorithm = $("alg").value;
+    const { ciphertext } = await postJSON("/encrypt", { message: text, algorithm });
     $("output").textContent = ciphertext;
-    setStatus($("status"), `Encrypted ✓ (${ciphertext.length} chars)`, true);
+    setStatus($("status"), `Encrypted ✓ [${algorithm.toUpperCase()}] (${ciphertext.length} chars)`, true);
   } catch (e) {
     setStatus($("status"), e.message, false);
   } finally {
@@ -159,9 +181,10 @@ async function decryptText() {
   if (!token) return setStatus($("status"), "Paste a ciphertext first.", false);
   $("btn-dec").disabled = true;
   try {
-    const { plaintext } = await postJSON("/decrypt", { ciphertext: token });
+    // Decrypt auto-detects AC3 vs AES from the envelope — no choice needed.
+    const { plaintext, algorithm } = await postJSON("/decrypt", { ciphertext: token });
     $("output").textContent = plaintext;
-    setStatus($("status"), "Decrypted ✓", true);
+    setStatus($("status"), `Decrypted ✓ [${(algorithm || "?").toUpperCase()}]`, true);
   } catch (e) {
     setStatus($("status"), e.message, false);
   } finally {
@@ -204,6 +227,7 @@ async function fileOp(action, button) {
   try {
     const form = new FormData();
     form.append("file", file, file.name);
+    form.append("algorithm", $("falg").value);  // 'ac3' | 'aes'
     const res = await fetch("/" + action, { method: "POST", body: form });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));

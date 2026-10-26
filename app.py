@@ -35,7 +35,8 @@ try:  # only needed when cross-origin use is explicitly enabled
 except ImportError:  # pragma: no cover
     CORS = None
 
-from ac3 import AC3Error, CMainController
+from ac3 import AC3Error, InvalidAlgorithmError, CMainController
+from ac3.aesgcm import looks_like_aes_stream, looks_like_aes_text, validate_algorithm
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024   # multipart body cap
@@ -179,6 +180,30 @@ def _safe_download_name(name: str, suffix: str = "") -> str:
     return name + suffix
 
 
+def _extract_algorithm(data) -> tuple:
+    """Read the optional 'algorithm' field ('ac3' | 'aes', default 'ac3').
+
+    Returns (algorithm, error_response). Decrypt endpoints don't need this —
+    the controller auto-detects from the envelope.
+    """
+    algorithm = data.get("algorithm", "ac3")
+    if not isinstance(algorithm, str):
+        return None, (jsonify({"error": "'algorithm' must be a string"}), 400)
+    try:
+        validate_algorithm(algorithm.lower())
+    except InvalidAlgorithmError:
+        return None, (
+            jsonify(
+                {
+                    "error": f"Unknown algorithm {algorithm!r}; "
+                    "expected 'ac3' or 'aes'."
+                }
+            ),
+            400,
+        )
+    return algorithm.lower(), None
+
+
 # --------------------------------------------------------------------------
 # text endpoints
 # --------------------------------------------------------------------------
@@ -194,6 +219,9 @@ def encrypt_message():
     message = data.get("message")
     if not isinstance(message, str) or message == "":
         return jsonify({"error": "Missing or empty 'message' parameter"}), 400
+    algorithm, algo_error = _extract_algorithm(data)
+    if algo_error:
+        return algo_error
     if len(message.encode("utf-8")) > MAX_TEXT_BYTES:
         return (
             jsonify(
@@ -202,12 +230,14 @@ def encrypt_message():
             413,
         )
     try:
-        token = controller.encrypt(message)
+        token = controller.encrypt(message, algorithm=algorithm)
     except AC3Error as exc:
         logger.warning("encrypt failed: %s", exc)
         return jsonify({"error": str(exc)}), 400
-    logger.info("encrypt: %d chars in, %d chars out", len(message), len(token))
-    return jsonify({"ciphertext": token}), 200
+    logger.info(
+        "encrypt [%s]: %d chars in, %d chars out", algorithm, len(message), len(token)
+    )
+    return jsonify({"ciphertext": token, "algorithm": algorithm}), 200
 
 
 @app.post("/decrypt")
@@ -229,8 +259,11 @@ def decrypt_message():
         # Integrity/envelope failures are expected outcomes, not server faults.
         logger.warning("decrypt rejected input: %s", exc.__class__.__name__)
         return jsonify({"error": str(exc)}), 400
-    logger.info("decrypt: %d chars in, %d chars out", len(token), len(message))
-    return jsonify({"plaintext": message}), 200
+    detected = "aes" if looks_like_aes_text(token) else "ac3"
+    logger.info(
+        "decrypt [%s]: %d chars in, %d chars out", detected, len(token), len(message)
+    )
+    return jsonify({"plaintext": message, "algorithm": detected}), 200
 
 
 # --------------------------------------------------------------------------
@@ -255,11 +288,22 @@ def encrypt_file():
     if error:
         return error
     filename, payload = parsed
+    raw_alg = request.form.get("algorithm", "ac3")
+    algorithm = raw_alg.lower().strip() if isinstance(raw_alg, str) else ""
+    if algorithm not in {"ac3", "aes"}:
+        return (
+            jsonify(
+                {"error": f"Unknown algorithm {raw_alg!r}; expected 'ac3' or 'aes'."}
+            ),
+            400,
+        )
     try:
-        blob = controller.encrypt_bytes(payload)
+        blob = controller.encrypt_bytes(payload, algorithm=algorithm)
     except AC3Error as exc:
         return jsonify({"error": str(exc)}), 400
-    logger.info("encrypt-file: %s (%d -> %d bytes)", filename, len(payload), len(blob))
+    logger.info(
+        "encrypt-file [%s]: %s (%d -> %d bytes)", algorithm, filename, len(payload), len(blob)
+    )
     return send_file(
         io.BytesIO(blob),
         mimetype="application/octet-stream",
@@ -281,7 +325,10 @@ def decrypt_file():
         return jsonify({"error": str(exc)}), 400
     if filename.endswith(".ac3"):
         filename = filename[: -len(".ac3")]
-    logger.info("decrypt-file: %s (%d -> %d bytes)", filename, len(payload), len(blob))
+    detected = "aes" if looks_like_aes_stream(payload) else "ac3"
+    logger.info(
+        "decrypt-file [%s]: %s (%d -> %d bytes)", detected, filename, len(payload), len(blob)
+    )
     return send_file(
         io.BytesIO(blob),
         mimetype="application/octet-stream",

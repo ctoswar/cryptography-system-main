@@ -2,10 +2,17 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)
-![Tests](https://img.shields.io/badge/tests-68%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-129%20passing-brightgreen.svg)
 ![pip-audit](https://img.shields.io/badge/dependencies-0%20CVEs-brightgreen.svg)
 
-A hardened rebuild of the **"AC3 level 5 Encryption Algorithm with Caesar Cipher and XOR Cipher"** thesis (STI College Bacoor, December 2023) — keeping the five-layer identity of the original design while fixing the cryptographic and engineering flaws of v1.
+A hardened rebuild of the **"AC3 level 5 Encryption Algorithm with Caesar Cipher and XOR Cipher"** thesis (STI College Bacoor, December 2023) — keeping the five-layer identity of the original design while fixing the cryptographic and engineering flaws of v1, **plus a standard AES-256-GCM mode for high-volume data.**
+
+Two algorithms ship side by side:
+
+| Algorithm | What it is | Best for |
+|---|---|---|
+| **AC3** | the five-layer thesis scheme, hardened (HKDF subkeys + HMAC integrity) | text, small files, the project's identity |
+| **AES** | **AES-256-GCM** (NIST SP 800-38D), hardware-accelerated, chunk-streamed | **large files / high-volume data** — ~400–500 MB/s in constant memory |
 
 **Thesis researchers:** Miguel Florencio F. Agapay · Duncan John D. Carpiso · Carlo R. Cobey · Leonavelle Camatog
 
@@ -35,18 +42,20 @@ every boot *and* after every decrypt, permanently orphaning old ciphertexts).
 
 | Claim | Evidence |
 |---|---|
-| Correct round-trips | 68 pytest tests: ASCII, Unicode/emoji/CJK/RTL, empty, 150 KB, all 256 byte values |
+| Correct round-trips | 129 pytest tests: ASCII, Unicode/emoji/CJK/RTL, empty, 150 KB, all 256 byte values |
 | Tampering is caught | Per-region tamper tests (nonce/body/tag), wrong-key rejection — all raise `IntegrityError` |
 | The key never rotates | Regression test encrypts, simulates a restart, decrypts with a fresh `KeyManager` |
 | Files survive byte-for-byte | 70 KB random binary → SHA-256 identical after decrypt |
 | No plaintext leaks into logs | Test asserts message contents never appear in any log record |
 | Dependencies are clean | `pip-audit`: 0 known CVEs; secret scan of the publishable file set: clean |
-| It's fast enough | ~1 MB encrypted/decrypted in 0.28 s |
+| It's fast enough (AC3) | ~1 MB encrypted/decrypted in 0.28 s |
+| AES handles high volume | 100 MB file → 395–509 MB/s, peak memory ~12 MB (constant), byte-exact round-trip |
 
-**Honest limits.** The scheme is educational: the primitives (SHA-256, HMAC,
+**Honest limits.** The AC3 scheme is educational: the primitives (SHA-256, HMAC,
 HKDF) are standard, but the layered construction around them is homegrown and
-unreviewed. For production data, use `Fernet` or `AESGCM` directly — the
-README and `SECURITY.md` both say so plainly.
+unreviewed. That's exactly why **AES-256-GCM mode now ships alongside it** — for
+production data use the AES path (or `cryptography`'s `AESGCM`/`Fernet`
+directly). The README and `SECURITY.md` both say so plainly.
 
 ## What changed from v1 (and why)
 
@@ -57,7 +66,7 @@ README and `SECURITY.md` both say so plainly.
 | Keys regenerated on every boot *and* after every decrypt → old ciphertexts permanently undecryptable | Master key generated **once**, persisted, never rotated (regression-tested) |
 | `.env` corrupted by key rotation (duplicate/merged lines) | Single `AC3_MASTER_KEY`, atomic read-modify-write, validated on load |
 | Caesar shift was ASCII-only (32–127) → Unicode silently destroyed | All layers operate on **bytes**; full UTF-8 round-trip (ñ, emoji, CJK, RTL) |
-| `decrypt()` crashed with `NameError` (`d_text_six` undefined) | Clean pipeline, no undefined references — 68 tests prove round-trips |
+| `decrypt()` crashed with `NameError` (`d_text_six` undefined) | Clean pipeline, no undefined references — 129 tests prove round-trips |
 | `/encrypt` returned a `bytearray` Flask can't serialize → HTTP 500 | Versioned, JSON-safe text envelope: `AC3v2.<nonce>.<body>.<tag>` |
 | Plaintext written to `project_logs.log` | Logging records only sizes and outcome classes — never contents |
 | `debug=True` on `0.0.0.0` | `debug=False`, binds `127.0.0.1` by default |
@@ -82,6 +91,20 @@ AC3v2.<nonce>.<body>.<tag>        (binary envelope for files)
 - **Subkeys:** derived from `(master key, nonce)` with distinct HKDF info labels per layer.
 - **Integrity:** tampering with *any* part of the envelope (nonce, body, or tag) or using the wrong key → `IntegrityError`, never silent garbage.
 
+## AES-256-GCM mode (high-volume)
+
+The five-layer pipeline is deliberately expressive, which makes it slow (~3.7 MB/s) and educational. For real, large data the project ships a **standard AES-256-GCM** mode using the same master key (HKDF domain-separated) — hardware-accelerated and streamed.
+
+```
+AC3AES magic | nonce_prefix(4) | salt(16) | chunk_size(4)
+  └─ per chunk: flag(1) | length(4) | AESGCM(chunk, nonce=prefix||counter, aad=header||counter||flag)
+```
+
+- **Chunked streaming:** constant memory regardless of file size — only one chunk (default 4 MiB) is held at a time, so multi-GB files run at disk speed.
+- **Authenticated chunk ordering:** the counter lives in both the nonce and the AAD, so reordering, truncation, splicing across files, or trailing data all fail authentication — not just bit flips.
+- **Auto-detect on decrypt:** `AC3A.…` text / `AC3AES` magic → AES; `AC3v2.…` / `AC3V2` → AC3. Callers never have to remember which mode produced a ciphertext.
+- **Measured:** 100 MB file → 395 MB/s encrypt, 509 MB/s decrypt, ~12 MB peak memory, byte-exact round-trip.
+
 ## Setup
 
 ```bash
@@ -103,73 +126,80 @@ python app.py
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `POST /encrypt` | `{"message": "..."}` | `{"ciphertext": "AC3v2...."}` |
-| `POST /decrypt` | `{"ciphertext": "AC3v2...."}` | `{"plaintext": "..."}` |
-| `POST /encrypt-file` | multipart `file` | downloadable `*.ac3` |
-| `POST /decrypt-file` | multipart `file` | decrypted download |
+| `POST /encrypt` | `{"message": "...", "algorithm": "ac3"\|"aes"}` | `{"ciphertext": "...", "algorithm": "..."}` |
+| `POST /decrypt` | `{"ciphertext": "..."}` | `{"plaintext": "...", "algorithm": "<auto-detected>"}` |
+| `POST /encrypt-file` | multipart `file` (+ optional `algorithm` field) | downloadable `*.ac3` |
+| `POST /decrypt-file` | multipart `file` | decrypted download (algorithm auto-detected) |
 | `GET /health` | — | `{"status": "ok", "version": 2}` |
 
-Uploads are capped at 64 MB. Invalid or tampered input returns `400` with a reason — never a stack trace.
+`algorithm` defaults to `ac3` on encrypt; decrypt always auto-detects from the envelope. Uploads are capped at 64 MB. Invalid or tampered input returns `400` with a reason — never a stack trace.
 
 ### CLI
 
 ```bash
-python cli.py encrypt "secret message"
-python cli.py decrypt "AC3v2...."
-echo "from a pipe" | python cli.py encrypt -
-python cli.py encrypt-file report.pdf            # -> report.pdf.ac3
-python cli.py decrypt-file report.pdf.ac3        # -> report.pdf (refuses to overwrite differing files)
-python cli.py keygen                             # create the master key if missing
+python cli.py encrypt "secret message"                       # AC3 (default)
+python cli.py encrypt "secret message" --algorithm aes       # AES-256-GCM
+python cli.py decrypt "AC3A...."                             # auto-detects either
+echo "from a pipe" | python cli.py encrypt - --algorithm aes
+python cli.py encrypt-file video.mp4 --algorithm aes         # -> video.mp4.ac3 (streams)
+python cli.py decrypt-file video.mp4.ac3                     # -> video.mp4 (refuses to overwrite differing files)
+python cli.py keygen                                         # create the master key if missing
 ```
 
 ### Library
 
 ```python
-from ac3 import AC3Cipher, CMainController
+from ac3 import AC3Cipher, AESGCMCipher, CMainController
 
-token = AC3Cipher().encrypt("hello ñ")       # auto-loads .env key
+token = AC3Cipher().encrypt("hello ñ")          # AC3 five-layer
 plain = AC3Cipher().decrypt(token)
 
-CMainController().encrypt_file("notes.txt")  # -> notes.txt.ac3
+aes = AESGCMCipher()                            # standard AES-256-GCM
+ct = aes.encrypt("hello ñ")                     # AC3A.… text envelope
+aes.encrypt_file("big.iso", "big.iso.ac3")      # constant-memory stream
+
+ctrl = CMainController()
+ctrl.encrypt("hi", algorithm="aes")
+ctrl.decrypt(ct)                                 # auto-detects
+ctrl.encrypt_file("notes.txt")                   # -> notes.txt.ac3
 ```
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -q        # 68 passed
+python -m pytest tests/ -q        # 129 passed
 ```
 
-Coverage highlights: ASCII/Unicode/emoji/empty/long round-trips, all-byte-value binary round-trips, tamper detection for every envelope region, wrong-key rejection, key stability across "restarts" (the v1 regression), file round-trips, API contract tests, clobber protection, and a log-leak test asserting plaintext never reaches the log.
+Coverage highlights: ASCII/Unicode/emoji/empty/long round-trips, all-byte-value binary round-trips, tamper detection for every envelope region, wrong-key rejection, key stability across "restarts" (the v1 regression), file round-trips, API contract tests, clobber protection, and a log-leak test asserting plaintext never reaches the log. AES mode adds: chunk-boundary round-trips (0 / 1 / exact / +1 / multi-chunk), reorder/truncate/splice/trailing-data rejection, algorithm auto-detection, and a constant-memory streaming test.
 
 ## Honest security assessment
 
-This project is an **educational artifact** and portfolio piece — not a drop-in replacement for vetted cryptography.
+This project is an **educational artifact** and portfolio piece — not a drop-in replacement for vetted cryptography. It now ships **two modes**, and the honest assessment differs for each.
 
-**What v2 genuinely provides:**
-- Confidentiality well beyond the classical ciphers it layers (unique per-message keystreams, keyed transposition)
-- Tamper *detection* (HMAC-SHA256) — modified ciphertext is rejected, not mis-decrypted
-- Proper key hygiene: one stable random 256-bit master key, per-message nonce, HKDF separation between layers
+**AC3 mode (the five-layer thesis scheme):**
+- *Genuinely provides:* confidentiality well beyond the classical ciphers it layers (unique per-message keystreams, keyed transposition); tamper *detection* (HMAC-SHA256) — modified ciphertext is rejected, not mis-decrypted; proper key hygiene (one stable random 256-bit master key, per-message nonce, HKDF separation between layers).
+- *What it is not:* it is **not** a vetted AEAD. The layer construction is homegrown and unreviewed; the primitives (SHA-256/HMAC/HKDF) are standard, but the *scheme* around them has not been peer-reviewed or formally verified. Throughput (~1 MB per 0.3 s) suits text and small files, not high-volume data.
 
-**What it is not:**
-- It is **not** AES-GCM, ChaCha20-Poly1305, or any vetted/constant-time-optimized AEAD. The layer construction is homegrown; the primitives (SHA-256/HMAC/HKDF) are standard, but the *scheme* around them has not been peer-reviewed or formally verified.
-- It does not provide authenticated key exchange, forward secrecy, or protection against a full compromise of the `.env` file.
-- Throughput (~1 MB per 0.3 s) is fine for text and small files, not for high-volume data.
+**AES mode (AES-256-GCM, NIST SP 800-38D):**
+- Uses a standard, widely reviewed AEAD via `cryptography`'s `AESGCM` — appropriate for real data. Adds a chunk-streamed framing layer for large files; that framing is homegrown (though each chunk is individually GCM-authenticated and bound to its position), so treat it as "standard primitive, custom streaming envelope."
+- Neither mode provides authenticated key exchange, forward secrecy, or protection against a full compromise of the `.env` file.
 
-**For production data, use `cryptography`'s `Fernet` or `AESGCM` directly.** The value of AC3 v2 is showing how a thesis-era classical design can be systematically hardened — measured, tested, and honestly documented.
+**For production data, prefer the AES mode — or call `cryptography`'s `AESGCM`/`Fernet` directly with no framing.** The value of AC3 v2 is showing how a thesis-era classical design can be systematically hardened — measured, tested, and honestly documented — while putting a real standard next to it.
 
 ## Project layout
 
 ```
 ac3/                 the library
   core.py            five-layer pipeline + envelopes
+  aesgcm.py          AES-256-GCM text + chunk-streamed file mode
   keys.py            master key management + HKDF derivation
   envelope.py        text/binary ciphertext formats
-  controller.py      app facade (strings, files)
+  controller.py      app facade (strings, files, algorithm select)
   exceptions.py      AC3Error hierarchy
 app.py               Flask API + web UI server
 templates/index.html single-page web UI (no build step)
 cli.py               command-line interface
-tests/               pytest suite (68 tests)
+tests/               pytest suite (129 tests)
 requirements.txt
 AC3 level 5 ... .pdf the original thesis
 ```
