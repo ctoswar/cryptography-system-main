@@ -1,8 +1,52 @@
 # AC3 v2 — Layered Encryption with Integrity
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)
+![Tests](https://img.shields.io/badge/tests-68%20passing-brightgreen.svg)
+![pip-audit](https://img.shields.io/badge/dependencies-0%20CVEs-brightgreen.svg)
+
 A hardened rebuild of the **"AC3 level 5 Encryption Algorithm with Caesar Cipher and XOR Cipher"** thesis (STI College Bacoor, December 2023) — keeping the five-layer identity of the original design while fixing the cryptographic and engineering flaws of v1.
 
 **Thesis researchers:** Miguel Florencio F. Agapay · Duncan John D. Carpiso · Carlo R. Cobey · Leonavelle Camatog
+
+## Case study: rebuilding a broken thesis cipher
+
+**Context.** The original v2 goal was not "invent a cipher." It was: take a
+working-but-flawed student project, understand precisely *why* it was
+cryptographically unsound, and rebuild it to production engineering standards
+while preserving its five-layer identity.
+
+**The core finding.** v1 stacked five XOR passes with static per-process keys.
+XOR is associative and commutative, so `k1 ⊕ k2 ⊕ k3 ⊕ k4 ⊕ k5` collapses to a
+**single constant XOR** — five "layers" provided exactly one layer of security,
+and an attacker who saw two known plaintext/ciphertext pairs could recover the
+combined key and decrypt everything. Stacking classical ciphers does not
+multiply their strength; it can quietly erase it.
+
+**The rebuild.** Every layer's key is now derived per message from
+`(master key, random 16-byte nonce)` via HKDF-SHA256 under a distinct info
+label — so no two messages ever share key material. An HMAC-SHA256 tag over
+version + nonce + body is verified in constant time *before* any decryption,
+turning "tampered ciphertext decrypts to garbage" into "tampered ciphertext is
+rejected." The master key is generated once and never rotated (v1 rotated it on
+every boot *and* after every decrypt, permanently orphaning old ciphertexts).
+
+**Proof, not promises.**
+
+| Claim | Evidence |
+|---|---|
+| Correct round-trips | 68 pytest tests: ASCII, Unicode/emoji/CJK/RTL, empty, 150 KB, all 256 byte values |
+| Tampering is caught | Per-region tamper tests (nonce/body/tag), wrong-key rejection — all raise `IntegrityError` |
+| The key never rotates | Regression test encrypts, simulates a restart, decrypts with a fresh `KeyManager` |
+| Files survive byte-for-byte | 70 KB random binary → SHA-256 identical after decrypt |
+| No plaintext leaks into logs | Test asserts message contents never appear in any log record |
+| Dependencies are clean | `pip-audit`: 0 known CVEs; secret scan of the publishable file set: clean |
+| It's fast enough | ~1 MB encrypted/decrypted in 0.28 s |
+
+**Honest limits.** The scheme is educational: the primitives (SHA-256, HMAC,
+HKDF) are standard, but the layered construction around them is homegrown and
+unreviewed. For production data, use `Fernet` or `AESGCM` directly — the
+README and `SECURITY.md` both say so plainly.
 
 ## What changed from v1 (and why)
 
