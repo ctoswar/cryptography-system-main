@@ -7,15 +7,24 @@ Public surface:
 """
 
 from .core import AC3Cipher, VERSION
+from .aesgcm import AESGCMCipher
 from .controller import CMainController
-from .exceptions import AC3Error, EnvelopeError, IntegrityError, InvalidKeyError
+from .exceptions import (
+    AC3Error,
+    EnvelopeError,
+    IntegrityError,
+    InvalidAlgorithmError,
+    InvalidKeyError,
+)
 
 __all__ = [
     "AC3Cipher",
+    "AESGCMCipher",
     "CMainController",
     "VERSION",
     "AC3Error",
     "EnvelopeError",
     "IntegrityError",
+    "InvalidAlgorithmError",
     "InvalidKeyError",
 ]

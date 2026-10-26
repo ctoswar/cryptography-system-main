@@ -152,6 +152,100 @@ def test_json_body_must_be_object(client):
 
 
 # --------------------------------------------------------------------------
+# AES algorithm selection + auto-detect (API surface)
+# --------------------------------------------------------------------------
+
+def test_encrypt_algorithm_aes(client):
+    res = client.post("/encrypt", json={"message": "aes path", "algorithm": "aes"})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ciphertext"].startswith("AC3A.")
+    assert data["algorithm"] == "aes"
+
+
+def test_encrypt_defaults_to_ac3(client):
+    res = client.post("/encrypt", json={"message": "default"})
+    assert res.get_json()["ciphertext"].startswith("AC3v2.")
+
+
+def test_decrypt_autodetects_both_algorithms(client):
+    for alg in ("ac3", "aes"):
+        tok = client.post(
+            "/encrypt", json={"message": f"round {alg}", "algorithm": alg}
+        ).get_json()["ciphertext"]
+        res = client.post("/decrypt", json={"ciphertext": tok})
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["plaintext"] == f"round {alg}"
+        assert data["algorithm"] == alg
+
+
+def test_unknown_algorithm_rejected(client):
+    res = client.post("/encrypt", json={"message": "x", "algorithm": "rot13"})
+    assert res.status_code == 400
+    assert "algorithm" in res.get_json()["error"].lower()
+
+
+def test_non_string_algorithm_rejected(client):
+    res = client.post("/encrypt", json={"message": "x", "algorithm": 3})
+    assert res.status_code == 400
+
+
+def test_tampered_aes_token_rejected(client):
+    tok = client.post(
+        "/encrypt", json={"message": "tamper", "algorithm": "aes"}
+    ).get_json()["ciphertext"]
+    prefix, nonce, body, tag = tok.split(".", 3)
+    bad = "AC3A." + ".".join([nonce, ("A" if body[0] != "A" else "B") + body[1:], tag])
+    res = client.post("/decrypt", json={"ciphertext": bad})
+    assert res.status_code == 400
+
+
+def test_file_encrypt_algorithm_aes_roundtrip(client):
+    payload = b"AES file payload " * 400
+    res = client.post(
+        "/encrypt-file",
+        data={"file": (io.BytesIO(payload), "doc.bin"), "algorithm": "aes"},
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 200
+    blob = res.get_data()
+    assert blob[:7] == b"AC3AES\x01"
+    back = client.post(
+        "/decrypt-file",
+        data={"file": (io.BytesIO(blob), "doc.bin.ac3")},
+        content_type="multipart/form-data",
+    )
+    assert back.status_code == 200 and back.get_data() == payload
+
+
+def test_file_encrypt_default_ac3_roundtrip(client):
+    payload = b"ac3 file payload"
+    res = client.post(
+        "/encrypt-file",
+        data={"file": (io.BytesIO(payload), "doc.bin")},
+        content_type="multipart/form-data",
+    )
+    blob = res.get_data()
+    assert blob[:6] == b"AC3V2\x01"
+    back = client.post(
+        "/decrypt-file",
+        data={"file": (io.BytesIO(blob), "doc.bin.ac3")},
+        content_type="multipart/form-data",
+    )
+    assert back.get_data() == payload
+
+
+def test_file_unknown_algorithm_rejected(client):
+    res = client.post(
+        "/encrypt-file",
+        data={"file": (io.BytesIO(b"x"), "doc.bin"), "algorithm": "des"},
+        content_type="multipart/form-data",
+    )
+    assert res.status_code == 400
+
+
+# --------------------------------------------------------------------------
 # Envelope canonicalisation (token-string malleability)
 # --------------------------------------------------------------------------
 

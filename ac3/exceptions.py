@@ -15,3 +15,7 @@ class IntegrityError(AC3Error):
 
 class InvalidKeyError(AC3Error):
     """The master key is missing or malformed."""
+
+
+class InvalidAlgorithmError(AC3Error):
+    """An unknown encryption algorithm was requested."""
