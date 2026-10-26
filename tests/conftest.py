@@ -28,3 +28,15 @@ def cipher() -> AC3Cipher:
 def env_dir(tmp_path) -> Path:
     """Isolated directory so KeyManager tests never touch the real .env."""
     return tmp_path
+
+
+@pytest.fixture()
+def client(env_dir):
+    """Flask test client wired to an isolated key store."""
+    import app as app_module
+    from ac3 import CMainController
+
+    app_module.controller = CMainController(env_path=env_dir / ".env")
+    app_module.app.config["TESTING"] = True
+    yield app_module.app.test_client()
+    app_module.app.config["TESTING"] = True  # restore after tests that flip it

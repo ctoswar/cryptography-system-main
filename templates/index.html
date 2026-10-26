@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AC3 v2 — Encrypt &amp; Decrypt</title>
-<style>
+<style nonce="{{ csp_nonce }}">
   :root {
     --bg: #0d1117;
     --panel: #161b22;
@@ -120,7 +120,7 @@
   random nonce. Keys live in <code>.env</code> — never in source control.
 </footer>
 
-<script>
+<script nonce="{{ csp_nonce }}">
 "use strict";
 const $ = (id) => document.getElementById(id);
 const setStatus = (el, msg, ok) => {
@@ -200,7 +200,7 @@ async function fileOp(action, button) {
   if (!file) return setStatus($("fstatus"), "Choose a file first.", false);
   button.disabled = true;
   setStatus($("fstatus"), `${action === "encrypt-file" ? "Encrypting" : "Decrypting"}…`);
-  $("fresult").innerHTML = "";
+  $("fresult").replaceChildren();
   try {
     const form = new FormData();
     form.append("file", file, file.name);
@@ -211,12 +211,20 @@ async function fileOp(action, button) {
     }
     const blob = await res.blob();
     const cd = res.headers.get("Content-Disposition") || "";
-    const match = cd.match(/filename="?([^";]+)"?/);
-    const name = match ? match[1] : (action === "encrypt-file" ? file.name + ".ac3" : file.name);
+    const match = cd.match(/filename\*?=(?:UTF-8''|"?)([^";]+)/i);
+    let name = match ? match[1] : (action === "encrypt-file" ? file.name + ".ac3" : file.name);
+    try { name = decodeURIComponent(name); } catch { /* keep raw */ }
     const url = URL.createObjectURL(blob);
-    $("fresult").innerHTML =
-      `Done ✓ <a download="${name}" href="${url}">Download ${name}</a> ` +
-      `(${blob.size.toLocaleString()} bytes)`;
+    // Download names come from a response header — treat as untrusted and
+    // build with DOM APIs only (never innerHTML: crafted .ac3 name = XSS).
+    const box = $("fresult");
+    const link = document.createElement("a");
+    link.setAttribute("download", name);
+    link.href = url;
+    link.textContent = "Download " + name;
+    const size = document.createElement("span");
+    size.textContent = ` (${blob.size.toLocaleString()} bytes)`;
+    box.replaceChildren(document.createTextNode("Done ✓ "), link, size);
     setStatus($("fstatus"), "", true);
   } catch (e) {
     setStatus($("fstatus"), e.message, false);

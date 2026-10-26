@@ -8,15 +8,8 @@ from app import app
 from ac3 import CMainController
 
 
-@pytest.fixture()
-def client(env_dir, monkeypatch):
-    monkeypatch.delenv("AC3_MASTER_KEY", raising=False)
-    import app as app_module
-
-    # Point the app at an isolated key store for the whole test session.
-    app_module.controller = CMainController(env_path=env_dir / ".env")
-    app_module.app.config["TESTING"] = True
-    return app_module.app.test_client()
+# The Flask test client fixture now lives in conftest.py (shared with
+# test_security.py) and points the app at an isolated key store.
 
 
 def test_health(client):

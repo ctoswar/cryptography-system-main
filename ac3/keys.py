@@ -44,7 +44,15 @@ def _write_env_value(env_path: Path, key: str, value: str) -> None:
             if not line.strip().startswith(f"{key}=")
         ]
     lines.append(f"{key}={value}")
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write privately: the file holds the master key. 0o600 on POSIX;
+    # best effort on Windows (no POSIX mode there).
+    tmp_path = env_path.with_name(env_path.name + ".tmp")
+    tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:  # pragma: no cover - platform dependent
+        pass
+    os.replace(tmp_path, env_path)
 
 
 def _validate_master_key(key_hex: str) -> bytes:
