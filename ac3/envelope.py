@@ -8,6 +8,7 @@ Binary form (file encryption) — avoids inflating files with base64:
 """
 
 import base64
+import re
 
 from .exceptions import EnvelopeError
 
@@ -16,17 +17,29 @@ BINARY_MAGIC = b"AC3V2\x01"
 NONCE_SIZE = 16
 TAG_SIZE = 32
 
+# Unpadded base64url alphabet only. Python's decoder discards unknown
+# characters by default, which would make token strings malleable
+# (AC3v2.n.BO.JUNK!US... == AC3v2.n.BONUS...); reject anything off-alphabet.
+_B64URL = re.compile(r"^[A-Za-z0-9_-]*$")
+
 
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
 def _b64d(text: str, what: str) -> bytes:
+    if not _B64URL.match(text):
+        raise EnvelopeError(f"{what} contains characters outside base64url.")
     try:
         padding = "=" * (-len(text) % 4)
-        return base64.urlsafe_b64decode(text + padding)
+        raw = base64.urlsafe_b64decode(text + padding)
     except Exception as exc:
         raise EnvelopeError(f"{what} is not valid base64url.") from exc
+    if _b64e(raw) != text:
+        # Non-canonical encoding (wrong padding bits) — decodes but must not
+        # be accepted, otherwise two strings map to one ciphertext.
+        raise EnvelopeError(f"{what} is not canonical base64url.")
+    return raw
 
 
 def encode_text(nonce: bytes, body: bytes, tag: bytes) -> str:
