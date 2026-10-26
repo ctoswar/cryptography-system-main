@@ -292,3 +292,99 @@ def test_controller_aes_file_streams_constant_memory(tmp_path, same_key):
         f"peak memory {peak / 1e6:.1f} MB — not streaming (file is {len(data) / 1e6:.0f} MB)"
     )
     assert c.decrypt_file(enc, tmp_path / "big.out").read_bytes() == data
+
+
+# --------------------------------------------------------------------------
+# V-1 regression: failed decrypt/encrypt must not leave partial output on disk
+#
+# Found by red-team repro: the AES streaming path used to write straight to
+# the destination file, so a mid-stream IntegrityError left partial PLAINTEXT
+# at the target (leaking decrypted content after a reported failure), and an
+# explicit target got truncated before failing. Atomic staging fixes it.
+# --------------------------------------------------------------------------
+
+def _corrupt_last_byte(path: Path) -> Path:
+    data = bytearray(path.read_bytes())
+    data[-2] ^= 0xFF  # flip a byte in the final chunk's tag
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_failed_aes_decrypt_leaves_no_partial_plaintext(tmp_path, same_key):
+    c = CMainController(cipher=AC3Cipher(same_key))
+    src = tmp_path / "doc.txt"
+    src.write_bytes(b"PLAINText-CONTENT-" * 400)  # many chunks
+    enc = c.encrypt_file(src, tmp_path / "doc.txt.ac3", algorithm="aes", chunk_size=64)
+    enc = _corrupt_last_byte(enc)
+
+    target = tmp_path / "decrypted_out.txt"
+    with pytest.raises(IntegrityError):
+        c.decrypt_file(enc, target)
+    assert not target.exists(), "partial plaintext left on disk after failed decrypt"
+    assert not list(tmp_path.glob(".ac3stg-*")), "staging temp left behind"
+    assert not list(tmp_path.glob(".ac3tmp-*")), "staging temp left behind"
+
+
+def test_failed_aes_decrypt_does_not_truncate_explicit_target(tmp_path, same_key):
+    c = CMainController(cipher=AC3Cipher(same_key))
+    src = tmp_path / "doc.txt"
+    src.write_bytes(b"payload " * 500)
+    enc = c.encrypt_file(src, tmp_path / "doc.txt.ac3", algorithm="aes", chunk_size=64)
+    enc = _corrupt_last_byte(enc)
+
+    victim = tmp_path / "important.txt"
+    victim.write_bytes(b"PRECIOUS EXISTING DATA")
+    with pytest.raises(IntegrityError):
+        c.decrypt_file(enc, victim)
+    assert victim.read_bytes() == b"PRECIOUS EXISTING DATA", (
+        "explicit target was truncated/overwritten by a decrypt that failed"
+    )
+
+
+def test_failed_aes_decrypt_default_path_not_bricked(tmp_path, same_key):
+    """A failed decrypt must not create the default target (which would brick a retry)."""
+    c = CMainController(cipher=AC3Cipher(same_key))
+    src = tmp_path / "payload.bin"
+    src.write_bytes(b"content " * 300)
+    # Encrypt to a distinct name so the default decrypt target ("sealed",
+    # after stripping .ac3) does NOT pre-exist — it's a fresh path.
+    enc = c.encrypt_file(src, tmp_path / "sealed.ac3", algorithm="aes", chunk_size=64)
+    enc = _corrupt_last_byte(enc)
+
+    default_target = tmp_path / "sealed"  # _default_decrypt_target("sealed.ac3")
+    assert not default_target.exists()
+    with pytest.raises(IntegrityError):
+        c.decrypt_file(enc)  # default target: "sealed"
+    assert not default_target.exists(), (
+        "failed decrypt created the default target, which would brick a retry"
+    )
+    # retry path is clean: no stray temps to confuse the no-clobber logic
+    assert not list(tmp_path.glob(".ac3stg-*"))
+    assert not list(tmp_path.glob(".ac3tmp-*"))
+
+
+def test_failed_aes_encrypt_leaves_no_partial_ciphertext(tmp_path, same_key):
+    """A mid-stream encrypt failure must not leave a half-written .ac3 behind."""
+    c = CMainController(cipher=AC3Cipher(same_key))
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"data " * 1000)
+
+    # Force a failure by making the AES cipher raise mid-write.
+    target = tmp_path / "out.ac3"
+    original = c._aes.encrypt_file
+    calls = {"n": 0}
+
+    def exploding(stream_src, stream_dst, **kw):
+        # write a few bytes then fail, mimicking an I/O or key error mid-stream
+        Path(stream_dst).write_bytes(b"PARTIAL-GARBAGE")
+        raise OSError("simulated disk failure mid-stream")
+
+    c._aes.encrypt_file = exploding
+    try:
+        with pytest.raises(OSError):
+            c.encrypt_file(src, target, algorithm="aes")
+    finally:
+        c._aes.encrypt_file = original
+
+    assert not target.exists(), "half-written ciphertext left behind after failed encrypt"
+    assert not list(tmp_path.glob(".ac3stg-*")), "staging temp left behind"

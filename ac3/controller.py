@@ -105,6 +105,28 @@ class CMainController:
         return target
 
     @staticmethod
+    def _atomic_write(dst: Path, writer) -> int:
+        """Run `writer(tmp_path)` against a staging file, commit via rename.
+
+        `writer` may stream to `tmp_path`; only if it returns without raising
+        is the result renamed onto `dst`. On any failure the staging file is
+        removed, so `dst` is never left truncated or half-written (and the
+        no-clobber guards never see a partial file). Returns the final size.
+        """
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(prefix=".ac3stg-", dir=str(dst.parent))
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            writer(tmp)
+            size = tmp.stat().st_size
+            os.replace(tmp, dst)  # atomic on same filesystem: commit on success
+            return size
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
     def _default_decrypt_target(source: Path) -> Path:
         name = source.name
         base = (
@@ -127,12 +149,16 @@ class CMainController:
         if algorithm == "aes":
             # Streaming path: constant memory regardless of file size.
             kwargs = {"chunk_size": chunk_size} if chunk_size else {}
-            self._aes.encrypt_file(src, dst, **kwargs)
-            size = dst.stat().st_size
+            size = self._atomic_write(
+                dst, lambda tmp: self._aes.encrypt_file(src, tmp, **kwargs)
+            )
         else:
-            ciphertext = self._cipher.encrypt_bytes(src.read_bytes())
-            dst.write_bytes(ciphertext)
-            size = len(ciphertext)
+            size = self._atomic_write(
+                dst,
+                lambda tmp: tmp.write_bytes(
+                    self._cipher.encrypt_bytes(src.read_bytes())
+                ),
+            )
         logger.info(
             "encrypted file [%s]: %s -> %s (%d bytes)", algorithm, src, dst, size
         )
@@ -178,22 +204,34 @@ class CMainController:
         return dst
 
     def _decrypt_file_to(self, src: Path, dst: Path, aes_mode: bool) -> None:
-        """Write decrypted plaintext of `src` to `dst` (streaming for AES)."""
-        if aes_mode:
-            self._aes.decrypt_file(src, dst)
-        else:
-            dst.write_bytes(self._cipher.decrypt_bytes(src.read_bytes()))
+        """Write decrypted plaintext of `src` to `dst` atomically.
+
+        Staged in a sibling temp file and renamed into place only after the
+        *entire* stream authenticates. Without this, a failed AES decrypt
+        left partial plaintext at `dst` (leaking content after an
+        IntegrityError) and, for an explicit target, truncated the
+        pre-existing file before failing.
+        """
+        self._atomic_write(
+            dst,
+            lambda tmp: self._aes.decrypt_file(src, tmp)
+            if aes_mode
+            else tmp.write_bytes(self._cipher.decrypt_bytes(src.read_bytes())),
+        )
 
     def _decrypt_file_to_temp(self, src: Path, aes_mode: bool) -> Path:
-        """Decrypt into a sibling temp file (for no-clobber comparison)."""
+        """Decrypt into a fresh sibling temp file (for no-clobber comparison)."""
         fd, tmp_name = tempfile.mkstemp(
             prefix=".ac3tmp-", dir=str(src.parent)
         )
         os.close(fd)
         tmp = Path(tmp_name)
         try:
-            self._decrypt_file_to(src, tmp, aes_mode)
-        except Exception:
+            if aes_mode:
+                self._aes.decrypt_file(src, tmp)
+            else:
+                tmp.write_bytes(self._cipher.decrypt_bytes(src.read_bytes()))
+        except BaseException:
             tmp.unlink(missing_ok=True)
             raise
         return tmp
