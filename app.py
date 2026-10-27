@@ -163,7 +163,8 @@ def index():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "version": 3, "algorithm": "ac3x"})
+    return jsonify({"status": "ok", "version": 4, "algorithm": "ac3x",
+                    "modes": ["classic", "siv", "session"]})
 
 
 def _check_json_content_type():
@@ -197,6 +198,13 @@ def encrypt_message():
     message = data.get("message")
     if not isinstance(message, str) or message == "":
         return jsonify({"error": "Missing or empty 'message' parameter"}), 400
+    mode = data.get("mode", "classic")
+    if not isinstance(mode, str) or mode.lower() not in {"classic", "siv", "session"}:
+        return (
+            jsonify({"error": f"Unknown mode {mode!r}; expected 'classic', 'siv', or 'session'."}),
+            400,
+        )
+    mode = mode.lower()
     if len(message.encode("utf-8")) > MAX_TEXT_BYTES:
         return (
             jsonify(
@@ -205,12 +213,12 @@ def encrypt_message():
             413,
         )
     try:
-        token = controller.encrypt(message)
+        token = controller.encrypt(message, mode=mode)
     except AC3Error as exc:
         logger.warning("encrypt failed: %s", exc)
         return jsonify({"error": str(exc)}), 400
-    logger.info("encrypt: %d chars in, %d chars out", len(message), len(token))
-    return jsonify({"ciphertext": token}), 200
+    logger.info("encrypt [%s]: %d chars in, %d chars out", mode, len(message), len(token))
+    return jsonify({"ciphertext": token, "mode": mode}), 200
 
 
 @app.post("/decrypt")

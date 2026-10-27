@@ -1,12 +1,17 @@
-"""Application facade over the AC3-X (v3) cipher.
+"""Application facade over the AC3-X (v4) cipher modes.
 
 Keeps the thesis-era entry point (``CMainController`` with ``encrypt`` /
 ``decrypt``) while adding streaming file support.
 
-Single algorithm: AC3-X is the five-layer thesis pipeline with an AES-256-CTR
-keystream engine and HMAC-SHA256 integrity (see SPEC.md). Text uses the
-``AC3X.`` envelope; files use the chunked stream format (``AC3X3`` magic) with
-constant memory regardless of file size.
+Modes (decrypt auto-detects from the envelope prefix):
+
+    classic  ``AC3X.`` — the five-layer thesis pipeline, AES-CTR engine;
+               carries a key ID so rotation never orphans data
+    siv      ``AC3S.`` — nonce-misuse-resistant (RFC 5297); nonce reuse
+               degrades to deterministic encryption instead of catastrophe
+    session  ``AC3E.`` — X25519 recipient-keyed (RFC 7748); the master key
+               leaves the confidentiality path (see the honest scope notes
+               in ac3/session.py and SECURITY.md)
 
 Durability contract (red-team finding V-1): every file write is staged in a
 sibling temp file and renamed into place only after the whole stream
@@ -22,33 +27,75 @@ import tempfile
 from pathlib import Path
 
 from .core import AC3Cipher
-from .exceptions import AC3Error, EnvelopeError
+from .exceptions import AC3Error, EnvelopeError, InvalidKeyError
 from .keys import DEFAULT_ENV_PATH, KeyManager
+from .session import SessionCipher
+from .siv import SIVTextCipher
 
 logger = logging.getLogger("ac3")
 
 ENCRYPTED_SUFFIX = ".ac3"
+
+MODES = ("classic", "siv", "session")
 
 
 class CMainController:
     """Facade used by the Flask app, the CLI, and tests."""
 
     def __init__(self, env_path=DEFAULT_ENV_PATH, key_manager=None, cipher=None):
+        self._keys = None
         if cipher is not None:
             self._cipher = cipher
+            self._keys = getattr(cipher, "_keys", None)
         else:
-            self._cipher = AC3Cipher(key_manager or KeyManager(env_path))
+            self._keys = key_manager or KeyManager(env_path)
+            self._cipher = AC3Cipher(self._keys)
+        self._siv = SIVTextCipher(self._cipher)
+        self._session = None  # lazily built: requires an env-backed key store
+
+    def _session_cipher(self) -> SessionCipher:
+        if self._session is None:
+            self._session = SessionCipher(self._cipher._master, self._keys)
+        return self._session
+
+    def _recipient_pub(self) -> bytes:
+        if self._keys is None:
+            raise InvalidKeyError(
+                "session mode requires an env-backed key store (X25519)."
+            )
+        return self._keys.x25519_public_key()
 
     # -- text ---------------------------------------------------------------
 
-    def encrypt(self, text: str) -> str:
-        token = self._cipher.encrypt(text)
-        logger.debug("encrypted text: %d chars -> %d chars", len(text), len(token))
+    def encrypt(self, text: str, mode: str = "classic") -> str:
+        """Encrypt text in one of the three modes (classic by default)."""
+        if mode == "siv":
+            token = self._siv.encrypt(text)
+        elif mode == "session":
+            token = self._session_cipher().encrypt(text, self._recipient_pub())
+        elif mode == "classic":
+            token = self._cipher.encrypt(text)
+        else:
+            raise AC3Error(
+                f"Unknown mode {mode!r}; expected one of {list(MODES)}."
+            )
+        logger.debug("encrypted text [%s]: %d chars -> %d chars",
+                     mode, len(text), len(token))
         return token
 
     def decrypt(self, token: str) -> str:
-        text = self._cipher.decrypt(token)
-        logger.debug("decrypted token: %d chars -> %d chars", len(token), len(text))
+        """Auto-detecting decrypt: the envelope prefix selects the mode."""
+        if token.startswith("AC3S."):
+            text = self._siv.decrypt(token)
+            mode = "siv"
+        elif token.startswith("AC3E."):
+            text = self._session_cipher().decrypt(token)
+            mode = "session"
+        else:
+            text = self._cipher.decrypt(token)
+            mode = "classic"
+        logger.debug("decrypted token [%s]: %d chars -> %d chars",
+                     mode, len(token), len(text))
         return text
 
     # -- bytes ---------------------------------------------------------------

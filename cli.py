@@ -49,7 +49,7 @@ def _build_controller(args) -> CMainController:
 
 def cmd_encrypt(args) -> int:
     controller = _build_controller(args)
-    token = controller.encrypt(_read_input(args.message))
+    token = controller.encrypt(_read_input(args.message), mode=args.mode)
     print(token)
     return 0
 
@@ -83,6 +83,12 @@ def cmd_keygen(args) -> int:
         env_file.exists() and MASTER_KEY_ENV in env_file.read_text(encoding="utf-8")
     )
     manager = KeyManager(env_path=env_path)  # creates only if missing
+    if args.rotate:
+        result = manager.rotate()
+        print(f"Rotated: active key archived as {result['archived_as']}")
+        print(f"  old key id: {result['old_key_id'].hex()}  (archived data stays decryptable)")
+        print(f"  new key id: {result['new_key_id'].hex()}")
+        return 0
     state = "already existed" if existed_before else "created"
     if args.show:
         print(f"Key (hex): {manager.master_key.hex()}")
@@ -105,6 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("encrypt", help="encrypt a text message", parents=[common])
     p.add_argument("message", help="plaintext, or '-' to read stdin")
+    p.add_argument(
+        "--mode",
+        choices=("classic", "siv", "session"),
+        default="classic",
+        help="classic = AC3X five-layer (default); siv = nonce-misuse-resistant; "
+        "session = X25519 recipient-keyed",
+    )
     p.set_defaults(func=cmd_encrypt)
 
     p = sub.add_parser("decrypt", help="decrypt a ciphertext", parents=[common])
@@ -129,6 +142,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("keygen", help="create the master key if missing", parents=[common])
     p.add_argument("--show", action="store_true", help="print the full key (sensitive!)")
+    p.add_argument(
+        "--rotate",
+        action="store_true",
+        help="retire the active key into the archive and generate a fresh one "
+        "(data encrypted under the old key stays decryptable via its key ID)",
+    )
     p.set_defaults(func=cmd_keygen)
 
     return parser

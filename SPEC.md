@@ -1,6 +1,6 @@
-# AC3-X Specification — Version 3
+# AC3-X Specification — Version 4
 
-**Status:** stable · **Supersedes:** AC3 v2 (`AC3v2.`, `AC3V2`) — clean break, no backward compatibility
+**Status:** stable · **Supersedes:** AC3 v2 (`AC3v2.`, `AC3V2`) — clean break, no backward compatibility. v4 is an **additive** revision: every v3 format parses exactly as before, and new modes/key-ID fields are optional extensions.
 
 AC3-X is a hybrid authenticated-encryption scheme: the five-layer AC3 thesis
 pipeline with its XOR keystream engine replaced by **AES-256-CTR**, composed
@@ -184,3 +184,90 @@ asserts exactly this in `tests/test_hybrid.py`.)
 | File memory | whole file in RAM | constant (~one chunk) |
 | Throughput | ~3.7 MB/s | ~150–200 MB/s (AES-NI) |
 | Legacy decrypt | — | rejected with an explicit re-encrypt error |
+
+## 8. v4 additions — key rotation, SIV, sessions
+
+### 8.1 Key IDs and rotation (weakness: rotation previously unsupported)
+
+Every v4 envelope ends with an optional **key ID** field: a 4-byte identifier
+derived as `HMAC-SHA256(master_key, "ac3x/v4/key-id")[:4]`. It names the
+long-term key that protected the envelope, so **rotation never orphans
+data** (the flaw that destroyed v1's history).
+
+- `AC3X.<nonce>.<body>.<tag>.<keyid>` — classic with key ID
+- Stream magic `AC3X4\x01`: header = magic ‖ keyid(4) ‖ nonce(16) ‖ chunk_size(4)
+  (the legacy `AC3X3` header remains valid and is resolved via
+  active-then-archive fallback)
+- The `.env` archive: rotating moves the active key to
+  `AC3_MASTER_KEY_V{n}` and generates a fresh `AC3_MASTER_KEY`. Decryption
+  resolves the envelope's key ID against the active key first, then the
+  archive. Unknown IDs raise a distinct `EnvelopeError` — key-management
+  errors are separated from tampering errors (`IntegrityError`).
+- Tokens WITHOUT a key ID (the §6 conformance vectors) resolve
+  active-then-archive; the HMAC decides.
+
+### 8.2 SIV mode — nonce-misuse resistance (weakness: catastrophic nonce reuse)
+
+New envelope family `AC3S.<nonce12>.<siv_output>[.<keyid>]` per **RFC 5297**
+(AES-SIV-CMAC-512 via a 64-byte HKDF-derived key):
+
+```
+key    = HKDF-SHA256(master, salt = nonce12, info = "ac3x/v4/siv/key", 64)
+output = AES-SIV-CMAC-512(key).encrypt(plaintext, ads = [b"ac3x/v4/siv", nonce12])
+```
+
+`output` = 16-byte synthetic IV ‖ ciphertext. Security semantics:
+
+| Event | Classic CTR (`AC3X`) | SIV (`AC3S`) |
+|---|---|---|
+| Nonce reused, same message | keystream reuse — catastrophic | identical ciphertext (equality leaks only) |
+| Nonce reused, different messages | plaintext XOR recovery — catastrophic | confidential, authenticated, independent-looking |
+| Tampering | `IntegrityError` | `IntegrityError` |
+
+Trade-offs: SIV ciphertext is deterministic under (key, nonce, message), and
+the mode is one-shot (the chunked streaming format is classic-only in v4).
+
+### 8.3 Session mode — X25519 key agreement (weakness: single-secret compromise)
+
+New envelope family `AC3E.<eph_pk>.<salt>.<nonce>.<body>.<mac>[.<keyid>]`:
+
+```
+ephemeral       fresh X25519 keypair per message (RFC 7748)
+shared          = X25519(ephemeral_sk, recipient_static_pk)
+session_master  = HKDF-SHA256(shared, salt, info = "ac3x/v4/session", 32)
+inner           = the §3/§4 classic pipeline under session_master
+bind            = HMAC-SHA256(HKDF-SHA256(master, salt, "ac3x/v4/session-bind"),
+                              eph_pk ‖ recipient_pk ‖ salt)[:16]
+mac             = inner_tag(32) ‖ bind(16)
+```
+
+The recipient verifies the bind (constant-time) before decrypting: the
+handshake is authenticated by the symmetric master key, blocking forged
+envelopes and MITM substitution in the shared-master deployment.
+
+**Honest security scope — read before citing:**
+
+- This is **key separation and public-key encryption**, **not strict forward
+  secrecy**. An ECIES-style handshake against a static recipient key does not
+  survive later compromise of that static key: a holder of (master,
+  X25519 static key, envelope) can recompute the session key.
+- True forward secrecy requires a symmetric ratchet that destroys past keys —
+  which directly conflicts with this design's founding principle of permanent
+  decryptability. That trade-off is documented, not hidden.
+- The ephemeral secret is discarded after encryption; CPython cannot
+  guarantee memory zeroization.
+- Cross-party *authentication* (signatures instead of the symmetric bind) is
+  future work; the bind presumes the shared master of the symmetric deployment.
+
+### 8.4 Performance characteristics (why the measured ceiling is honest)
+
+The classic pipeline performs ~5 full-buffer passes per byte (Caesar
+translate, AES-CTR, column gather + join, AES-CTR, HMAC). On CPython +
+OpenSSL this lands at **161–242 MB/s** (see
+`evaluation/results/benchmarks.json`) — CPU- and memory-bandwidth-bound, not
+algorithmically improvable without changing the layer structure or adding
+parallelism (chunk transforms are independent; the stream MAC is sequential —
+parallel execution is a documented future direction, not implemented).
+Latency for small messages (~0.11 ms p50) is dominated by the per-message
+HKDF schedule and two CTR context setups. SIV mode adds one CMAC pass;
+session mode adds one X25519 operation plus one HKDF per message.

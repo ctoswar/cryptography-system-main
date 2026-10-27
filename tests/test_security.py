@@ -192,7 +192,7 @@ def test_file_stream_roundtrip(client):
     )
     assert res.status_code == 200
     blob = res.get_data()
-    assert blob[:6] == b"AC3X3\x01"
+    assert blob[:6] == b"AC3X4\x01"
     back = client.post(
         "/decrypt-file",
         data={"file": (io.BytesIO(blob), "doc.bin.ac3")},
