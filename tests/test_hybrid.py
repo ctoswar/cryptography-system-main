@@ -327,8 +327,8 @@ def test_spec_vector_text_short():
     token = _vector_cipher().seal_deterministic(b"AC3-X", VECTOR_NONCE)
     assert token == (
         "AC3X.ABEiM0RVZneImaq7zN3u_w."
-        "NLJQGzsbXKAeIA."
-        "jowNTmk6xpfjYF8ZkNxcV-5JGA4f2FJj9vA4-T_j498"
+        "9TPrCObvpumVeQ."
+        "Q7U1gtd5xx6HggcZEWy69k4ubwj-AY1EkFEFl9_Je9Q"
     )
 
 
@@ -336,8 +336,8 @@ def test_spec_vector_text_empty():
     token = _vector_cipher().seal_deterministic(b"", VECTOR_NONCE)
     assert token == (
         "AC3X.ABEiM0RVZneImaq7zN3u_w."
-        "NLlQp-Q."
-        "CEF9AE1nMc-I5dIdcXWZ10Jvc0Bd22l_XUm6XeKJ8qI"
+        "HPKtceE."
+        "KjTQlfFhYF9ldHFdAM9hFBBuI3Rhd3jkNMaOEr8r3Ws"
     )
 
 
@@ -350,9 +350,9 @@ def test_spec_vector_stream_multichunk():
         nonce=VECTOR_NONCE,
     )
     assert out.getvalue().hex() == (
-        "41433358330100112233445566778899aabbccddeeff00000008000000000867c1156eea42df29"
-        "0000000008429a2e403827922c00000000084532c2f68d3369b801000000031f97af7920884500"
-        "10e69e9591e28b3277701d28d8f77075fc9f5dd831e22bdeb0b493"
+        "41433358330100112233445566778899aabbccddeeff00000008000000000884479d6de69f121f"
+        "0000000008f6d2032b063f38b000000000081ce4f663705f7b380100000003c9687cd75f72b4f25"
+        "3c3ccd2500c334478ced2a6087751c37400f0613774e809a613f4"
     )
 
 
@@ -361,3 +361,50 @@ def test_spec_vectors_roundtrip_through_public_api():
     assert c.decrypt(c.seal_deterministic(b"AC3-X", VECTOR_NONCE)) == "AC3-X"
     blob = c.encrypt_bytes(b"AC3-X", chunk_size=8)
     assert c.decrypt_bytes(blob) == b"AC3-X"
+
+
+# --------------------------------------------------------------------------
+# Audit-round-3 regressions (F-1, F-2, F-3)
+# --------------------------------------------------------------------------
+
+def test_valid_tag_non_utf8_rejected_as_envelope_error(cipher):
+    """F-1: a validly-tagged non-UTF-8 plaintext must raise AC3Error,
+    never a bare UnicodeDecodeError (which would escape the API as a 500).
+    Reachable only with the key — this locks the failure *type*."""
+    from cryptography.hazmat.primitives import hmac as _hmac, hashes
+
+    raw = bytes([0xFF, 0xFE, 0x00])  # invalid UTF-8
+    nonce = secrets.token_bytes(16)
+    body, tag = cipher._seal(raw, nonce)
+    token = TEXT_PREFIX + ".".join([
+        __import__("base64").urlsafe_b64encode(nonce).decode().rstrip("="),
+        __import__("base64").urlsafe_b64encode(body).decode().rstrip("="),
+        __import__("base64").urlsafe_b64encode(tag).decode().rstrip("="),
+    ])
+    with pytest.raises(EnvelopeError, match="UTF-8"):
+        cipher.decrypt(token)
+
+
+def test_text_and_stream_subkeys_are_domain_separated(same_key):
+    """F-2: the text and stream protocols must never share subkey material,
+    even for the same (master, nonce)."""
+    from ac3.core import _KeySchedule
+
+    ks_text = _KeySchedule(same_key, VECTOR_NONCE, domain=b"text")
+    ks_stream = _KeySchedule(same_key, VECTOR_NONCE, domain=b"stream")
+    assert ks_text.k3 != ks_stream.k3
+    assert ks_text.k5 != ks_stream.k5
+    assert ks_text.mac_key != ks_stream.mac_key
+    assert ks_text.shift != ks_stream.shift or ks_text.columns != ks_stream.columns
+    assert ks_text.iv(3, 0) != ks_stream.iv(3, 0)
+
+
+def test_controller_chunk_size_zero_raises(tmp_path, same_key):
+    """F-3: chunk_size=0 must be rejected, not silently treated as the default."""
+    c = CMainController(cipher=AC3Cipher(same_key))
+    src = tmp_path / "a.bin"
+    src.write_bytes(b"data" * 100)
+    with pytest.raises(Exception):
+        c.encrypt_file(src, tmp_path / "a.ac3", chunk_size=0)
+    with pytest.raises(Exception):
+        c.encrypt_bytes(b"data", chunk_size=0)
