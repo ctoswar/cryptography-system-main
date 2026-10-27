@@ -1,0 +1,32 @@
+{
+  "bit_propagation": {
+    "samples": 64,
+    "payload_bits": 2048,
+    "ac3x_mean_change_ratio": 0.0008680555555555555,
+    "ac3x_stdev": 0.0005716319038265956,
+    "aes_ctr_baseline_mean": 0.00048828125,
+    "interpretation": "stream modes propagate no bit diffusion by design (CTR baseline matches AC3-X); diffusion avalanche is a block-cipher property; integrity is enforced by the HMAC tag instead"
+  },
+  "key_sensitivity": {
+    "key_bits": 256,
+    "mean_change_ratio": 0.5007258740421456,
+    "stdev": 0.010571509847606046,
+    "min": 0.4722222222222222,
+    "max": 0.532088122605364,
+    "ideal": 0.5
+  },
+  "entropy": {
+    "messages": 64,
+    "payload_bytes": 4096,
+    "mean_bits_per_byte": 7.9771453510088595,
+    "stdev": 0.0016889360912361636,
+    "max_possible": 8.0
+  },
+  "chi_square": {
+    "bytes_observed": 262304,
+    "chi2_statistic": 289.16,
+    "df": 255,
+    "critical_value_005": 293.16,
+    "passes_uniform_at_005": true
+  }
+}

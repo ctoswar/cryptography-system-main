@@ -1,0 +1,80 @@
+{
+  "environment": {
+    "timestamp_utc": "2026-10-27T15:28:22.054324+00:00",
+    "python": "3.11.15",
+    "cryptography": "50.0.2",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "cpu": "AMD64 Family 23 Model 8 Stepping 2, AuthenticAMD",
+    "notes": "single-process CPython, files on local disk, default 4 MiB chunks"
+  },
+  "throughput": [
+    {
+      "payload_bytes": 1024,
+      "reps": 30,
+      "encrypt_mean_s": 0.00018491333324467026,
+      "encrypt_stdev_s": 0.00034433224599865074,
+      "encrypt_MBs": 5.537729389394989,
+      "decrypt_mean_s": 0.0001351866667998062,
+      "decrypt_stdev_s": 3.6695181822153884e-05,
+      "decrypt_MBs": 7.574711502550842
+    },
+    {
+      "payload_bytes": 65536,
+      "reps": 30,
+      "encrypt_mean_s": 0.00027068666656001976,
+      "encrypt_stdev_s": 2.6568333897481614e-05,
+      "encrypt_MBs": 242.11018899768604,
+      "decrypt_mean_s": 0.0002998166667263528,
+      "decrypt_stdev_s": 2.3447242016636394e-05,
+      "decrypt_MBs": 218.58691418184466
+    },
+    {
+      "payload_bytes": 1048576,
+      "reps": 30,
+      "encrypt_mean_s": 0.0050342666666438165,
+      "encrypt_stdev_s": 0.0008087991597019593,
+      "encrypt_MBs": 208.28773472563222,
+      "decrypt_mean_s": 0.005986263333367484,
+      "decrypt_stdev_s": 0.0010758994308305288,
+      "decrypt_MBs": 175.1636942122523
+    },
+    {
+      "payload_bytes": 10485760,
+      "reps": 30,
+      "encrypt_mean_s": 0.05282149333330987,
+      "encrypt_stdev_s": 0.005624710685875238,
+      "encrypt_MBs": 198.5131305136266,
+      "decrypt_mean_s": 0.05489829333337184,
+      "decrypt_stdev_s": 0.005913648106725838,
+      "decrypt_MBs": 191.0033875975861
+    },
+    {
+      "payload_bytes": 104857600,
+      "reps": 30,
+      "encrypt_mean_s": 0.6510793666665147,
+      "encrypt_stdev_s": 0.04563767093594757,
+      "encrypt_MBs": 161.05194753270143,
+      "decrypt_mean_s": 0.6604754999998477,
+      "decrypt_stdev_s": 0.0,
+      "decrypt_MBs": 158.7607715956522
+    }
+  ],
+  "latency": {
+    "payload_bytes": 1024,
+    "samples": 1000,
+    "mean_ms": 0.11701369999445888,
+    "p50_ms": 0.11100000028818613,
+    "p95_ms": 0.15100000018719584,
+    "p99_ms": 0.19950000023527537,
+    "max_ms": 0.3252000005886657
+  },
+  "memory": {
+    "payload_bytes": 104857600,
+    "peak_encrypt_bytes": 29382361,
+    "peak_decrypt_bytes": 25187548,
+    "peak_encrypt_MB": 29.382361,
+    "peak_decrypt_MB": 25.187548,
+    "memory_ratio_encrypt": 0.2802120304107666,
+    "memory_ratio_decrypt": 0.2402071762084961
+  }
+}
