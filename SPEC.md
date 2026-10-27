@@ -34,14 +34,20 @@ conformance testing.
 ## 2. Key schedule
 
 All subkeys derive from the 32-byte master key `MK` and the 16-byte message
-nonce `N` via HKDF-SHA256 (RFC 5869):
+nonce `N` via HKDF-SHA256 (RFC 5869). **The text and stream protocols use
+disjoint label namespaces** (`ac3x/v3/text/…` vs `ac3x/v3/stream/…`), so no
+key material is ever shared across protocols even if a nonce were reused
+between them:
 
 ```
 PRK = HMAC-SHA256(salt = N, ikm = MK)              # HKDF-Extract
-subkey(label, len) = HKDF-Expand(PRK, "ac3x/v3/" || label, len)
+subkey(label, len) = HKDF-Expand(PRK, "ac3x/v3/" || D || "/" || label, len)
 ```
 
-| Subkey | Label (`ac3x/v3/…`) | Size | Use |
+where `D` = `text` for the one-shot text envelope and `stream` for the
+chunked stream envelope.
+
+| Subkey | Label (`ac3x/v3/<D>/…`) | Size | Use |
 |---|---|---|---|
 | `shift` | `l2-shift` | 1 B | Caesar shift = (byte mod 255) + 1 → 1..255, never 0 |
 | `K3` | `l3-ctr-key` | 32 B | AES-256 key for the L3 XOR pass |
@@ -146,21 +152,21 @@ Nonce (16 B), used in all vectors below:
 ### Vector 1 — text, plaintext `AC3-X`
 
 ```
-AC3X.ABEiM0RVZneImaq7zN3u_w.NLJQGzsbXKAeIA.jowNTmk6xpfjYF8ZkNxcV-5JGA4f2FJj9vA4-T_j498
+AC3X.ABEiM0RVZneImaq7zN3u_w.9TPrCObvpumVeQ.Q7U1gtd5xx6HggcZEWy69k4ubwj-AY1EkFEFl9_Je9Q
 ```
 
 ### Vector 2 — text, empty plaintext
 
 ```
-AC3X.ABEiM0RVZneImaq7zN3u_w.NLlQp-Q.CEF9AE1nMc-I5dIdcXWZ10Jvc0Bd22l_XUm6XeKJ8qI
+AC3X.ABEiM0RVZneImaq7zN3u_w.HPKtceE.KjTQlfFhYF9ldHFdAM9hFBBuI3Rhd3jkNMaOEr8r3Ws
 ```
 
 ### Vector 3 — stream, plaintext `AC3-X hybrid vector payload`, chunk_size = 8
 
 ```
-41433358330100112233445566778899aabbccddeeff00000008000000000867c1156eea42df29
-0000000008429a2e403827922c00000000084532c2f68d3369b801000000031f97af7920884500
-10e69e9591e28b3277701d28d8f77075fc9f5dd831e22bdeb0b493
+41433358330100112233445566778899aabbccddeeff00000008000000000884479d6de69f121f
+0000000008f6d2032b063f38b000000000081ce4f663705f7b380100000003c9687cd75f72b4f25
+3c3ccd2500c334478ced2a6087751c37400f0613774e809a613f4
 ```
 
 (A cross-implementation is conformant iff it reproduces these outputs

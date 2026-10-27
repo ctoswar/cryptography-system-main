@@ -76,25 +76,32 @@ _INFO = b"ac3x/v3/"
 # --------------------------------------------------------------------------
 
 class _KeySchedule:
-    """All per-message key material, derived once from (master, nonce)."""
+    """All per-message key material, derived once from (master, nonce).
 
-    def __init__(self, master_key: bytes, nonce: bytes):
+    `domain` separates the two envelope protocols: the text path and the
+    stream path derive from disjoint label namespaces, so key material is
+    never shared across protocols even if a nonce were reused between them.
+    """
+
+    def __init__(self, master_key: bytes, nonce: bytes, domain: bytes = b"text"):
         self.prk = _extract(master_key, nonce)  # HKDF-Extract, salt = nonce
-        shift_byte = _expand(self.prk, _INFO + b"l2-shift", 1)[0]
+        base = _INFO + domain + b"/"
+        shift_byte = _expand(self.prk, base + b"l2-shift", 1)[0]
         self.shift = (shift_byte % 255) + 1     # never 0: Caesar must move bytes
-        self.k3 = _expand(self.prk, _INFO + b"l3-ctr-key", 32)
-        self.k5 = _expand(self.prk, _INFO + b"l5-ctr-key", 32)
-        self.columns = self._column_order()
-        self.mac_key = _expand(self.prk, _INFO + b"mac", 32)
+        self.k3 = _expand(self.prk, base + b"l3-ctr-key", 32)
+        self.k5 = _expand(self.prk, base + b"l5-ctr-key", 32)
+        self.columns = self._column_order(base)
+        self.mac_key = _expand(self.prk, base + b"mac", 32)
+        self._base = base
 
     def iv(self, layer: int, index: int) -> bytes:
         """16-byte CTR counter block, unique per (layer, chunk index)."""
         idx = index.to_bytes(8, "big")
-        return _expand(self.prk, _INFO + f"l{layer}-ctr-iv/".encode() + idx, 16)
+        return _expand(self.prk, self._base + f"l{layer}-ctr-iv/".encode() + idx, 16)
 
-    def _column_order(self) -> list:
+    def _column_order(self, base: bytes) -> list:
         """Deterministic Fisher-Yates shuffle of column indices 0..7."""
-        rnd = _expand(self.prk, _INFO + b"l4-columns", _COLUMNS)
+        rnd = _expand(self.prk, base + b"l4-columns", _COLUMNS)
         order = list(range(_COLUMNS))
         for i in range(_COLUMNS - 1, 0, -1):
             j = rnd[_COLUMNS - 1 - i] % (i + 1)
@@ -206,7 +213,16 @@ class AC3Cipher:
 
     def decrypt(self, token: str) -> str:
         nonce, body, tag = decode_text(token, prefix=TEXT_PREFIX)
-        return self._open(nonce, body, tag).decode("utf-8")
+        plain = self._open(nonce, body, tag)
+        try:
+            return plain.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Reachable only with a valid tag (i.e. the key) — but every
+            # failure must be an AC3Error, never a bare UnicodeDecodeError
+            # (which would escape the API's error handling as a 500).
+            raise EnvelopeError(
+                "Decrypted plaintext is not valid UTF-8."
+            ) from exc
 
     # -- bytes API (stream envelope, in memory) ----------------------------
 
@@ -239,7 +255,7 @@ class AC3Cipher:
         nonce = nonce or secrets.token_bytes(_NONCE_SIZE)
         if len(nonce) != _NONCE_SIZE:
             raise AC3Error(f"nonce must be {_NONCE_SIZE} bytes.")
-        ks = _KeySchedule(self._master, nonce)
+        ks = _KeySchedule(self._master, nonce, domain=b"stream")
         header = STREAM_MAGIC + nonce + chunk_size.to_bytes(4, "big")
 
         mac = hmac.HMAC(ks.mac_key, hashes.SHA256())
@@ -288,7 +304,7 @@ class AC3Cipher:
         if not 1 <= chunk_size <= MAX_CHUNK_SIZE:
             raise EnvelopeError(f"Stream declares invalid chunk size {chunk_size}.")
 
-        ks = _KeySchedule(self._master, nonce)
+        ks = _KeySchedule(self._master, nonce, domain=b"stream")
         mac = hmac.HMAC(ks.mac_key, hashes.SHA256())
         mac.update(header)
 

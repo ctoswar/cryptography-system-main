@@ -54,7 +54,7 @@ class CMainController:
     # -- bytes ---------------------------------------------------------------
 
     def encrypt_bytes(self, data: bytes, chunk_size: int | None = None) -> bytes:
-        if chunk_size:
+        if chunk_size is not None:
             return self._cipher.encrypt_bytes(data, chunk_size=chunk_size)
         return self._cipher.encrypt_bytes(data)
 
@@ -113,7 +113,7 @@ class CMainController:
         if not src.is_file():
             raise AC3Error(f"Input file not found: {src}")
         dst = Path(target) if target else self._default_encrypt_target(src)
-        kwargs = {"chunk_size": chunk_size} if chunk_size else {}
+        kwargs = {"chunk_size": chunk_size} if chunk_size is not None else {}
         size = self._atomic_write(
             dst, lambda tmp: self._cipher.encrypt_file(src, tmp, **kwargs)
         )
