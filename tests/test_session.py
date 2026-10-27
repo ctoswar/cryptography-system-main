@@ -43,8 +43,9 @@ def test_envelope_shape(session, keys):
     token = session.encrypt("shape", keys.x25519_public_key())
     parts = token.split(".")
     assert parts[0] == "AC3E"
-    assert len(parts) == 7  # prefix + epk + salt + nonce + body + mac + keyid
-    assert len(base64.urlsafe_b64decode(parts[1] + "==")) == 32  # ephemeral pk
+    assert len(parts) == 6  # prefix + enc + nonce + body + mac + keyid
+    assert len(base64.urlsafe_b64decode(parts[1] + "==")) == 32  # HPKE enc
+    assert len(base64.urlsafe_b64decode(parts[2] + "==")) == 16  # inner nonce
 
 
 def test_ephemeral_randomness(session, keys):
@@ -63,9 +64,9 @@ def test_handshake_bind_rejects_forgery(session, keys):
     pub = keys.x25519_public_key()
     token = session.encrypt("auth check", pub)
     parts = token.split(".")
-    mac = bytearray(base64.urlsafe_b64decode(parts[5] + "=="))
-    mac[-1] ^= 0x01  # flip a bind-tag bit
-    parts[5] = base64.urlsafe_b64encode(bytes(mac)).decode().rstrip("=")
+    mac = bytearray(base64.urlsafe_b64decode(parts[4] + "=="))
+    mac[-1] ^= 0x01  # flip a bind-tag bit (mac field = inner tag || bind)
+    parts[4] = base64.urlsafe_b64encode(bytes(mac)).decode().rstrip("=")
     with pytest.raises(IntegrityError, match="handshake"):
         session.decrypt(".".join(parts))
 
@@ -101,7 +102,7 @@ def test_requires_env_backed_keys():
 
 
 def test_session_keys_are_not_the_master(session, keys):
-    """The confidentiality path uses the ECDH-derived session master —
+    """The confidentiality path uses the HPKE-derived session master —
     an attacker holding ONLY the master key cannot decrypt (the ephemeral
     secret is gone). Verified here by directly attempting the classic
     pipeline under the master key."""
@@ -109,9 +110,9 @@ def test_session_keys_are_not_the_master(session, keys):
     token = session.encrypt("not decryptable with master alone", pub)
     # carve the inner classic fields out of the session envelope
     parts = token.split(".")
-    nonce = base64.urlsafe_b64decode(parts[3] + "==")
-    body = base64.urlsafe_b64decode(parts[4] + "==")
-    tag = base64.urlsafe_b64decode(parts[5] + "==")[:32]
+    nonce = base64.urlsafe_b64decode(parts[2] + "==")
+    body = base64.urlsafe_b64decode(parts[3] + "==")
+    tag = base64.urlsafe_b64decode(parts[4] + "==")[:32]
     from ac3 import AC3Cipher
 
     with pytest.raises(IntegrityError):

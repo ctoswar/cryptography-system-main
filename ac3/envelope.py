@@ -134,32 +134,73 @@ def decode_siv(token: str):
 
 
 def decode_session(token: str):
-    """Parse ``AC3E.<eph_pk>.<salt>.<nonce>.<body>.<mac>[.<keyid>]``.
+    """Parse session envelopes — both generations.
 
-    ``mac`` = 32-byte HMAC tag || 16-byte handshake bind tag (48 bytes).
-    Returns (eph_pk, salt, nonce, body, mac, key_id_or_None).
+    v5 (HPKE):  ``AC3E.<enc>.<nonce>.<body>.<mac>[.<keyid>]``
+    v4 (legacy): ``AC3E.<eph_pk>.<salt>.<nonce>.<body>.<mac>[.<keyid>]``
+
+    ``mac`` = 32-byte inner HMAC tag || 16-byte handshake bind tag (48 bytes).
+    Returns a dict with ``profile`` ("v5"/"v4") and the decoded fields.
+    Distinguished by part count: 6 parts (or 5 key-ID-less) -> v5;
+    7 parts (or 6 key-ID-less) -> v4.
     """
-    raw_fields, decoded = _split(token, SESSION_PREFIX, "Session ciphertext")
-    if len(raw_fields) not in (5, 6):
-        raise EnvelopeError(
-            f"Ciphertext must have the form "
-            f"{SESSION_PREFIX}eph_pk.salt.nonce.body.mac[.keyid]."
-        )
-    eph_pk, salt, nonce, body, mac = decoded[:5]
-    if len(eph_pk) != 32:
+    if not isinstance(token, str) or not token.startswith(SESSION_PREFIX):
+        _reject_legacy(token)
+        raise EnvelopeError(f"Ciphertext must start with '{SESSION_PREFIX}'.")
+    raw_fields = token[len(SESSION_PREFIX):].split(".")
+    decoded = [_b64d(part, f"Session field {i + 1}")
+               for i, part in enumerate(raw_fields)]
+
+    # SESSION_PREFIX includes the trailing dot, so `raw_fields` counts only
+    # the value fields: v5 = enc,nonce,body,mac[,keyid]; v4 = eph,salt,...
+    # The ambiguous 5-field case (v5+keyid vs v4 key-ID-less) is resolved by
+    # the last field's length: 4 bytes -> key ID (v5), 48 bytes -> mac (v4).
+    if len(raw_fields) == 5 and len(decoded[4]) == KEY_ID_SIZE:
+        enc, nonce, body, mac = decoded[:4]
+        _session_common(enc, salt=None, nonce=nonce, mac=mac)
+        return {"profile": "v5", "enc": enc, "salt": None, "nonce": nonce,
+                "body": body, "mac": mac, "key_id": decoded[4]}
+    if len(raw_fields) == 4:
+        enc, nonce, body, mac = decoded
+        _session_common(enc, salt=None, nonce=nonce, mac=mac)
+        return {"profile": "v5", "enc": enc, "salt": None, "nonce": nonce,
+                "body": body, "mac": mac, "key_id": None}
+    if len(raw_fields) == 6:
+        enc, salt, nonce, body, mac = decoded[:5]
+        _session_common(enc, salt=salt, nonce=nonce, mac=mac)
+        return {"profile": "v4", "enc": enc, "salt": salt, "nonce": nonce,
+                "body": body, "mac": mac, "key_id": decoded[5]}
+    if len(raw_fields) == 5 and len(decoded[4]) == TAG_SIZE + 16:
+        enc, salt, nonce, body, mac = decoded
+        _session_common(enc, salt=salt, nonce=nonce, mac=mac)
+        return {"profile": "v4", "enc": enc, "salt": salt, "nonce": nonce,
+                "body": body, "mac": mac, "key_id": None}
+    raise EnvelopeError(
+        f"Session ciphertext must have the form {SESSION_PREFIX}"
+        "enc.nonce.body.mac[.keyid] (v5) or "
+        f"{SESSION_PREFIX}eph_pk.salt.nonce.body.mac[.keyid] (v4)."
+    )
+
+
+def _session_common(enc, salt, nonce, mac):
+    if len(enc) != 32:
         raise EnvelopeError("Ephemeral X25519 public key must be 32 bytes.")
-    if len(salt) < 16:
+    if salt is not None and len(salt) < 16:
         raise EnvelopeError("Session salt must be at least 16 bytes.")
     if len(nonce) != NONCE_SIZE:
         raise EnvelopeError(f"Nonce must be {NONCE_SIZE} bytes.")
     if len(mac) != TAG_SIZE + 16:
         raise EnvelopeError("Session MAC field must be 48 bytes (tag + bind).")
-    key_id_value = None
-    if len(raw_fields) == 6:
-        key_id_value = decoded[5]
+
+
+def _session_key_id(decoded, index):
+    """Extract the optional trailing key ID (4 bytes) if present."""
+    if len(decoded) > index:
+        key_id_value = decoded[index]
         if len(key_id_value) != KEY_ID_SIZE:
             raise EnvelopeError(f"Key ID must be {KEY_ID_SIZE} bytes.")
-    return eph_pk, salt, nonce, body, mac, key_id_value
+        return key_id_value
+    return None
 
 
 def decode_text(token: str):

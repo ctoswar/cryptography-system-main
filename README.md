@@ -25,6 +25,10 @@ confidentiality path — see the honest scope note below).
 | **siv** | `AC3S.<n12>.<output>` | RFC 5297 AES-SIV-CMAC-512 | when nonce uniqueness can't be guaranteed |
 | **session** | `AC3E.<epk>.<salt>.<n>.<b>.<mac>` | RFC 7748 X25519 + the classic core | encrypting without sharing the master key |
 
+The session mode's key agreement is **RFC 9180 HPKE-conformant** — verified
+byte-for-byte against the RFC's published A.7.1 test vectors — and every design
+decision is anchored to a citable source in docs/REFERENCES.md.
+
 **Thesis researchers:** Miguel Florencio F. Agapay · Duncan John D. Carpiso · Carlo R. Cobey · Leonavelle Camatog
 
 ## Case study: rebuilding a broken thesis cipher — twice
