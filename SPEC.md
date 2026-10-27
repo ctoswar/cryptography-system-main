@@ -2,6 +2,12 @@
 
 **Status:** stable · **Supersedes:** AC3 v2 (`AC3v2.`, `AC3V2`) — clean break, no backward compatibility. v4 is an **additive** revision: every v3 format parses exactly as before, and new modes/key-ID fields are optional extensions.
 
+**Standards position:** AC3-X *composes* standard primitives in a provably
+secure pattern (encrypt-then-MAC) with formal vector-verified specifications
+— but as a custom construction without independent review it does **not**
+claim parity with a FIPS-standard primitive. The comparative study and the
+full annotated bibliography live in docs/REFERENCES.md.
+
 AC3-X is a hybrid authenticated-encryption scheme: the five-layer AC3 thesis
 pipeline with its XOR keystream engine replaced by **AES-256-CTR**, composed
 with **HMAC-SHA256** in the provably-secure encrypt-then-MAC order.
@@ -227,30 +233,39 @@ output = AES-SIV-CMAC-512(key).encrypt(plaintext, ads = [b"ac3x/v4/siv", nonce12
 Trade-offs: SIV ciphertext is deterministic under (key, nonce, message), and
 the mode is one-shot (the chunked streaming format is classic-only in v4).
 
-### 8.3 Session mode — X25519 key agreement (weakness: single-secret compromise)
+### 8.3 Session mode — HPKE key agreement (RFC 9180)
 
-New envelope family `AC3E.<eph_pk>.<salt>.<nonce>.<body>.<mac>[.<keyid>]`:
+New envelope family `AC3E.<enc>.<nonce>.<body>.<mac>[.<keyid>]`, built on the
+**HPKE suite DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, Export-Only AEAD**
+(kem_id 0x0020, kdf_id 0x0001, aead_id 0xFFFF — RFC 9180 Appendix A.7), the
+RFC's registered suite for applications that derive their own keys:
 
 ```
-ephemeral       fresh X25519 keypair per message (RFC 7748)
-shared          = X25519(ephemeral_sk, recipient_static_pk)
-session_master  = HKDF-SHA256(shared, salt, info = "ac3x/v4/session", 32)
-inner           = the §3/§4 classic pipeline under session_master
-bind            = HMAC-SHA256(HKDF-SHA256(master, salt, "ac3x/v4/session-bind"),
-                              eph_pk ‖ recipient_pk ‖ salt)[:16]
-mac             = inner_tag(32) ‖ bind(16)
+enc, ctx          = HPKE-SetupBaseS(recipient_pub, info = "ac3x/v5")
+session_master    = ctx.Export("ac3x/v5/session-master", 32)     # §5.3 exporter
+inner             = the §3/§4 classic pipeline under session_master
+bind              = HMAC-SHA256(HMAC-SHA256(master, "ac3x/v5/session-bind"),
+                                enc || recipient_pk)[:16]
+mac               = inner_tag(32) || bind(16)
 ```
 
 The recipient verifies the bind (constant-time) before decrypting: the
 handshake is authenticated by the symmetric master key, blocking forged
-envelopes and MITM substitution in the shared-master deployment.
+envelopes and MITM substitution in the shared-master deployment. Pre-HPKE
+(v4 salt-based) session envelopes remain decryptable via a legacy fallback.
+
+**Conformance:** the HPKE implementation is verified byte-for-byte against
+the RFC 9180 **Appendix A.7.1** published vectors (key derivation,
+encapsulation shared secret, key schedule, exporter secret, and all three
+exported values) — `tests/test_hpke.py`. This is an IETF-vector conformance
+claim, not a self-assessment.
 
 **Honest security scope — read before citing:**
 
 - This is **key separation and public-key encryption**, **not strict forward
   secrecy**. An ECIES-style handshake against a static recipient key does not
-  survive later compromise of that static key: a holder of (master,
-  X25519 static key, envelope) can recompute the session key.
+  survive later compromise of that static key: a holder of (master, X25519
+  static key, envelope) can recompute the session key.
 - True forward secrecy requires a symmetric ratchet that destroys past keys —
   which directly conflicts with this design's founding principle of permanent
   decryptability. That trade-off is documented, not hidden.
@@ -258,6 +273,18 @@ envelopes and MITM substitution in the shared-master deployment.
   guarantee memory zeroization.
 - Cross-party *authentication* (signatures instead of the symmetric bind) is
   future work; the bind presumes the shared master of the symmetric deployment.
+
+### 8.3.1 Key commitment
+
+Key commitment (Bellare & Hoang 2022, ePrint 2022/268) asks: can one
+ciphertext verify under two different keys? For the classic envelope the tag
+is `HMAC-SHA256(Km, ...)` where `Km` is determined by the master key through
+HKDF — producing a token valid under two chosen masters requires an
+HMAC-SHA256 collision (about 2^128 work), so the classic envelope **is
+key-committing up to generic HMAC security**. The session mode additionally
+binds the envelope to the master via the handshake bind tag. This matters
+because non-committing AEAD enables partitioning-oracle attacks (NDSS 2022)
+— the analysis here closes that question for AC3-X's layers.
 
 ### 8.4 Performance characteristics (why the measured ceiling is honest)
 
