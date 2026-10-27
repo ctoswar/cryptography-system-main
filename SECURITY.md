@@ -2,23 +2,29 @@
 
 ## What this project is
 
-AC3 v2 is an **educational / portfolio** encryption system: a hardened rebuild of
-a thesis-era five-layer algorithm (framing → byte Caesar → XOR → transposition →
-HMAC-SHA256). The primitives (SHA-256, HMAC, HKDF) are standard, but the layered
-*scheme* around them has **not** been peer-reviewed or formally verified.
+AC3-X (v3) is an **educational / portfolio** encryption system: the thesis-era
+five-layer pipeline (framing → byte Caesar → XOR → transposition → XOR + HMAC)
+with its XOR keystream engine replaced by **AES-256-CTR** (NIST SP 800-38A) and
+integrity provided by **HMAC-SHA256** (FIPS 198-1) in encrypt-then-MAC order.
+All subkeys derive via HKDF-SHA256 (RFC 5869). The full construction, key
+schedule, and conformance vectors are specified in [`SPEC.md`](SPEC.md).
 
-It also ships a **standard AES-256-GCM mode** (see below) for high-volume data.
+**Honest characterization:** AC3-X does not add provable strength over plain
+AES-CTR + HMAC — the Caesar/transposition layers are keyed structural
+whitening kept for continuity with the thesis. The scheme has **not** been
+independently audited.
 
-**For real production data, use the AES mode — or call `cryptography`'s
-`Fernet` / `AESGCM` directly.** Do not rely on the AC3 five-layer mode to
-protect production data; it is an educational artifact.
+**For adversarial production data, call `cryptography`'s `Fernet` / `AESGCM`
+directly.** AC3-X is an educational artifact.
 
 ## Supported versions
 
 | Version | Supported |
 |---------|-----------|
-| 2.x     | ✅ all fixes land here |
-| 1.x     | ❌ removed — v1 had known design flaws (see README) |
+| 3.x (AC3-X) | ✅ all fixes land here |
+| 2.x (`AC3v2.` / `AC3V2`) | ❌ removed — clean break; legacy envelopes are rejected with a re-encrypt error |
+| interim AES envelopes (`AC3A.` / `AC3AES`) | ❌ removed |
+| 1.x | ❌ removed — v1 had known design flaws (see README) |
 
 ## Reporting a vulnerability
 
@@ -38,25 +44,26 @@ You can expect an acknowledgement within a few days. A valid report includes:
 
 These are documented on purpose and are not considered vulnerabilities:
 
-- **AC3 mode** uses a homegrown layered construction — not a vetted AEAD;
-  educational use only.
+- The layered construction wraps standard primitives but is **not** a vetted
+  AEAD and has not been peer-reviewed; treat AC3-X as AES-CTR + HMAC with
+  extra keyed transforms.
+- **Nonce reuse is catastrophic** (CTR keystream reuse). The implementation
+  generates a fresh random 16-byte nonce per message; fixed-nonce paths exist
+  solely for conformance vectors and must never be used on real data.
 - No forward secrecy; compromise of the `.env` master key reveals all data
-  encrypted under it (both modes).
-- AC3-mode throughput (~1 MB / 0.3 s) is unsuitable for high-volume data —
-  use the AES mode for that.
-- **AES mode** uses the standard AES-256-GCM primitive but wraps it in a
-  custom chunk-streamed envelope for large files (each chunk is individually
-  GCM-authenticated and position-bound); the framing is not independently
-  peer-reviewed.
+  encrypted under it.
+- No authenticated key exchange; the master key must be distributed out of band.
+- Streaming decrypt produces plaintext chunks before the final stream tag
+  verifies (inherent to streaming MACs). The reference implementation stages
+  output and commits it atomically only after the tag verifies.
 
-## AES-256-GCM mode
+## What the stream format defends against
 
-The `aes` algorithm is AES-256-GCM via `cryptography`'s `AESGCM` — a standard,
-widely reviewed AEAD — with the same HKDF-derived key material (domain-separated
-from the AC3 layers). It streams large files in constant memory (~400–500 MB/s).
-Its chunk-streaming framing is homegrown but binds every chunk to its index via
-nonce + AAD, so reordering, truncation, and cross-file splicing fail
-authentication. Prefer this mode for real data.
+The running HMAC covers the header (including the nonce) and every frame
+(flag, length, payload), so all of the following fail authentication and are
+regression-tested: bit flips anywhere, truncation, chunk reordering,
+splicing frames across files, flag/length forgery, and trailing data after
+the final tag.
 
 ## Secret handling
 

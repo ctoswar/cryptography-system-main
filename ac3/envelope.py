@@ -1,10 +1,14 @@
-"""Ciphertext envelope formats for AC3 v2.
+"""Ciphertext envelope formats for AC3-X (v3).
 
 Text form (API/CLI strings):
-    AC3v2.<nonce_b64url>.<body_b64url>.<tag_b64url>
+    AC3X.<nonce_b64url>.<body_b64url>.<tag_b64url>
 
-Binary form (file encryption) — avoids inflating files with base64:
-    b"AC3V2\x01" || nonce(16) || body || tag(32)
+Binary data (files, arbitrary size) uses the chunked stream format defined in
+:mod:`ac3.core` (magic ``AC3X3\\x01``); there is no separate one-shot binary
+envelope in v3.
+
+Legacy v2 envelopes (``AC3v2.`` text, ``AC3V2`` binary) and the interim AES
+envelopes (``AC3A.``) are NOT accepted: v3 is a clean break.
 """
 
 import base64
@@ -12,15 +16,17 @@ import re
 
 from .exceptions import EnvelopeError
 
-TEXT_PREFIX = "AC3v2."
-BINARY_MAGIC = b"AC3V2\x01"
+TEXT_PREFIX = "AC3X."
 NONCE_SIZE = 16
 TAG_SIZE = 32
 
 # Unpadded base64url alphabet only. Python's decoder discards unknown
 # characters by default, which would make token strings malleable
-# (AC3v2.n.BO.JUNK!US... == AC3v2.n.BONUS...); reject anything off-alphabet.
+# (AC3X.n.BO.JUNK!US... == AC3X.n.BONUS...); reject anything off-alphabet.
 _B64URL = re.compile(r"^[A-Za-z0-9_-]*$")
+
+# Prefixes this implementation must refuse (clean break from v2 / interim AES).
+_LEGACY_PREFIXES = ("AC3v2.", "AC3A.")
 
 
 def _b64e(data: bytes) -> str:
@@ -54,6 +60,12 @@ def decode_text(
     tag_size: int = TAG_SIZE,
 ):
     if not isinstance(token, str) or not token.startswith(prefix):
+        for legacy in _LEGACY_PREFIXES:
+            if isinstance(token, str) and token.startswith(legacy):
+                raise EnvelopeError(
+                    f"Legacy envelope '{legacy}' is not supported by AC3-X (v3); "
+                    "re-encrypt the data with the current version."
+                )
         raise EnvelopeError(f"Ciphertext must start with '{prefix}'.")
     parts = token[len(prefix):].split(".")
     if len(parts) != 3:
@@ -63,23 +75,4 @@ def decode_text(
         raise EnvelopeError(f"Nonce must be {nonce_size} bytes.")
     if len(tag) != tag_size:
         raise EnvelopeError(f"Tag must be {tag_size} bytes.")
-    return nonce, body, tag
-
-
-def encode_binary(nonce: bytes, body: bytes, tag: bytes) -> bytes:
-    return BINARY_MAGIC + nonce + body + tag
-
-
-def decode_binary(blob: bytes):
-    if not isinstance(blob, (bytes, bytearray, memoryview)):
-        raise EnvelopeError("Binary ciphertext must be bytes.")
-    blob = bytes(blob)
-    header = len(BINARY_MAGIC) + NONCE_SIZE
-    if len(blob) < header + TAG_SIZE:
-        raise EnvelopeError("Binary ciphertext is truncated.")
-    if not blob.startswith(BINARY_MAGIC):
-        raise EnvelopeError("Binary ciphertext is missing the AC3 v2 header.")
-    nonce = blob[len(BINARY_MAGIC):header]
-    body = blob[header:-TAG_SIZE]
-    tag = blob[-TAG_SIZE:]
     return nonce, body, tag

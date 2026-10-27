@@ -1,4 +1,4 @@
-"""Exception hierarchy for AC3 v2."""
+"""Exception hierarchy for AC3-X (v3)."""
 
 
 class AC3Error(Exception):
@@ -6,7 +6,7 @@ class AC3Error(Exception):
 
 
 class EnvelopeError(AC3Error):
-    """The ciphertext envelope is malformed, truncated, or not AC3 v2."""
+    """The ciphertext envelope is malformed, truncated, or not AC3-X."""
 
 
 class IntegrityError(AC3Error):
@@ -15,7 +15,3 @@ class IntegrityError(AC3Error):
 
 class InvalidKeyError(AC3Error):
     """The master key is missing or malformed."""
-
-
-class InvalidAlgorithmError(AC3Error):
-    """An unknown encryption algorithm was requested."""

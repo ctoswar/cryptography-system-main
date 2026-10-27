@@ -28,7 +28,7 @@ def test_encrypt_decrypt_roundtrip(client):
     res = client.post("/encrypt", json={"message": "hello thesis 👋"})
     assert res.status_code == 200
     token = res.get_json()["ciphertext"]
-    assert token.startswith("AC3v2.")
+    assert token.startswith("AC3X.")
 
     res = client.post("/decrypt", json={"ciphertext": token})
     assert res.status_code == 200
@@ -62,7 +62,7 @@ def test_decrypt_rejects_tampered(client):
     ]
     prefix, nonce, body, tag = token.split(".", 3)
     flipped = body[:-2] + ("A" if body[-2] != "A" else "B") + body[-1]
-    tampered = "AC3v2." + ".".join([nonce, flipped, tag])
+    tampered = "AC3X." + ".".join([nonce, flipped, tag])
     res = client.post("/decrypt", json={"ciphertext": tampered})
     # Either the MAC catches it (400) or base64 differs — must never be 200 with wrong text.
     assert res.status_code == 400

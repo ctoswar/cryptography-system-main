@@ -1,16 +1,17 @@
-"""Application facade over the AC3 v2 and AES-GCM ciphers.
+"""Application facade over the AC3-X (v3) cipher.
 
 Keeps the thesis-era entry point (``CMainController`` with ``encrypt`` /
-``decrypt``) while adding file support and algorithm selection.
+``decrypt``) while adding streaming file support.
 
-Algorithm contract:
-    * ``encrypt(..., algorithm=...)`` selects the mode — ``"ac3"`` (default,
-      the five-layer thesis identity) or ``"aes"`` (AES-256-GCM standard).
-    * ``decrypt`` / ``decrypt_file`` **auto-detect** from the envelope:
-      ``AC3a.…`` text or ``AC3AES`` magic -> AES; ``AC3v2.…`` / ``AC3V2`` -> AC3.
-      Callers never have to remember which mode produced a ciphertext.
-    * File encryption with ``algorithm="aes"`` streams chunk-by-chunk:
-      constant memory, AES-NI speed — the high-volume path.
+Single algorithm: AC3-X is the five-layer thesis pipeline with an AES-256-CTR
+keystream engine and HMAC-SHA256 integrity (see SPEC.md). Text uses the
+``AC3X.`` envelope; files use the chunked stream format (``AC3X3`` magic) with
+constant memory regardless of file size.
+
+Durability contract (red-team finding V-1): every file write is staged in a
+sibling temp file and renamed into place only after the whole stream
+authenticates — a failed decrypt/encrypt never leaves partial output behind
+and never truncates an existing target.
 
 Never logs message contents.
 """
@@ -20,13 +21,6 @@ import os
 import tempfile
 from pathlib import Path
 
-from .aesgcm import (
-    TEXT_PREFIX as AES_TEXT_PREFIX,
-    AESGCMCipher,
-    looks_like_aes_stream,
-    looks_like_aes_text,
-    validate_algorithm,
-)
 from .core import AC3Cipher
 from .exceptions import AC3Error, EnvelopeError
 from .keys import DEFAULT_ENV_PATH, KeyManager
@@ -42,54 +36,29 @@ class CMainController:
     def __init__(self, env_path=DEFAULT_ENV_PATH, key_manager=None, cipher=None):
         if cipher is not None:
             self._cipher = cipher
-            self._aes = AESGCMCipher(cipher._master)  # same master key
         else:
-            keys = key_manager or KeyManager(env_path)
-            self._cipher = AC3Cipher(keys)
-            self._aes = AESGCMCipher(keys)
-
-    @property
-    def algorithms(self):
-        return ("ac3", "aes")
+            self._cipher = AC3Cipher(key_manager or KeyManager(env_path))
 
     # -- text ---------------------------------------------------------------
 
-    def encrypt(self, text: str, algorithm: str = "ac3") -> str:
-        validate_algorithm(algorithm)
-        if algorithm == "aes":
-            token = self._aes.encrypt(text)
-        else:
-            token = self._cipher.encrypt(text)
-        logger.debug(
-            "encrypted text [%s]: %d chars -> %d chars", algorithm, len(text), len(token)
-        )
+    def encrypt(self, text: str) -> str:
+        token = self._cipher.encrypt(text)
+        logger.debug("encrypted text: %d chars -> %d chars", len(text), len(token))
         return token
 
     def decrypt(self, token: str) -> str:
-        """Auto-detecting decrypt: the envelope prefix selects the algorithm."""
-        if looks_like_aes_text(token):
-            text = self._aes.decrypt(token)
-            alg = "aes"
-        else:
-            text = self._cipher.decrypt(token)
-            alg = "ac3"
-        logger.debug(
-            "decrypted token [%s]: %d chars -> %d chars", alg, len(token), len(text)
-        )
+        text = self._cipher.decrypt(token)
+        logger.debug("decrypted token: %d chars -> %d chars", len(token), len(text))
         return text
 
     # -- bytes ---------------------------------------------------------------
 
-    def encrypt_bytes(self, data: bytes, algorithm: str = "ac3") -> bytes:
-        validate_algorithm(algorithm)
-        if algorithm == "aes":
-            return self._aes.encrypt_bytes(data)
+    def encrypt_bytes(self, data: bytes, chunk_size: int | None = None) -> bytes:
+        if chunk_size:
+            return self._cipher.encrypt_bytes(data, chunk_size=chunk_size)
         return self._cipher.encrypt_bytes(data)
 
     def decrypt_bytes(self, blob: bytes) -> bytes:
-        """Auto-detecting decrypt: magic bytes select the algorithm."""
-        if looks_like_aes_stream(blob):
-            return self._aes.decrypt_bytes(blob)
         return self._cipher.decrypt_bytes(blob)
 
     # -- files ----------------------------------------------------------------
@@ -138,53 +107,38 @@ class CMainController:
             base = name + ".decrypted"
         return source.with_name(base)
 
-    def encrypt_file(self, source, target=None, algorithm: str = "ac3",
-                     chunk_size: int | None = None) -> Path:
-        validate_algorithm(algorithm)
+    def encrypt_file(self, source, target=None, chunk_size: int | None = None) -> Path:
+        """Encrypt a file with the chunked stream format (constant memory)."""
         src = Path(source)
         if not src.is_file():
             raise AC3Error(f"Input file not found: {src}")
         dst = Path(target) if target else self._default_encrypt_target(src)
-
-        if algorithm == "aes":
-            # Streaming path: constant memory regardless of file size.
-            kwargs = {"chunk_size": chunk_size} if chunk_size else {}
-            size = self._atomic_write(
-                dst, lambda tmp: self._aes.encrypt_file(src, tmp, **kwargs)
-            )
-        else:
-            size = self._atomic_write(
-                dst,
-                lambda tmp: tmp.write_bytes(
-                    self._cipher.encrypt_bytes(src.read_bytes())
-                ),
-            )
-        logger.info(
-            "encrypted file [%s]: %s -> %s (%d bytes)", algorithm, src, dst, size
+        kwargs = {"chunk_size": chunk_size} if chunk_size else {}
+        size = self._atomic_write(
+            dst, lambda tmp: self._cipher.encrypt_file(src, tmp, **kwargs)
         )
+        logger.info("encrypted file: %s -> %s (%d bytes)", src, dst, size)
         return dst
 
     def decrypt_file(self, source, target=None) -> Path:
+        """Decrypt a file; output is committed atomically after full authentication."""
         src = Path(source)
         if not src.is_file():
             raise AC3Error(f"Input file not found: {src}")
-        with src.open("rb") as probe:
-            aes_mode = looks_like_aes_stream(probe.read(8))
-        alg = "aes" if aes_mode else "ac3"
 
         if target:
             dst = Path(target)  # explicit path: user intent is clear
-            self._decrypt_file_to(src, dst, aes_mode)
+            self._decrypt_file_to(src, dst)
             logger.info(
-                "decrypted file [%s]: %s -> %s (%d bytes)",
-                alg, src, dst, dst.stat().st_size,
+                "decrypted file: %s -> %s (%d bytes)",
+                src, dst, dst.stat().st_size,
             )
             return dst
 
         dst = self._default_decrypt_target(src)
         if dst.exists():
             # Stage the plaintext, then compare: never destroy differing data.
-            staged = self._decrypt_file_to_temp(src, aes_mode)
+            staged = self._decrypt_file_to_temp(src)
             try:
                 if dst.read_bytes() == staged.read_bytes():
                     logger.info("decrypted content already present: %s", dst)
@@ -196,30 +150,25 @@ class CMainController:
             finally:
                 staged.unlink(missing_ok=True)
 
-        self._decrypt_file_to(src, dst, aes_mode)
+        self._decrypt_file_to(src, dst)
         logger.info(
-            "decrypted file [%s]: %s -> %s (%d bytes)",
-            alg, src, dst, dst.stat().st_size,
+            "decrypted file: %s -> %s (%d bytes)",
+            src, dst, dst.stat().st_size,
         )
         return dst
 
-    def _decrypt_file_to(self, src: Path, dst: Path, aes_mode: bool) -> None:
+    def _decrypt_file_to(self, src: Path, dst: Path) -> None:
         """Write decrypted plaintext of `src` to `dst` atomically.
 
         Staged in a sibling temp file and renamed into place only after the
-        *entire* stream authenticates. Without this, a failed AES decrypt
-        left partial plaintext at `dst` (leaking content after an
-        IntegrityError) and, for an explicit target, truncated the
+        *entire* stream authenticates. Without this, a failed decrypt would
+        leave partial plaintext at `dst` (leaking content after an
+        IntegrityError) and, for an explicit target, would truncate the
         pre-existing file before failing.
         """
-        self._atomic_write(
-            dst,
-            lambda tmp: self._aes.decrypt_file(src, tmp)
-            if aes_mode
-            else tmp.write_bytes(self._cipher.decrypt_bytes(src.read_bytes())),
-        )
+        self._atomic_write(dst, lambda tmp: self._cipher.decrypt_file(src, tmp))
 
-    def _decrypt_file_to_temp(self, src: Path, aes_mode: bool) -> Path:
+    def _decrypt_file_to_temp(self, src: Path) -> Path:
         """Decrypt into a fresh sibling temp file (for no-clobber comparison)."""
         fd, tmp_name = tempfile.mkstemp(
             prefix=".ac3tmp-", dir=str(src.parent)
@@ -227,14 +176,11 @@ class CMainController:
         os.close(fd)
         tmp = Path(tmp_name)
         try:
-            if aes_mode:
-                self._aes.decrypt_file(src, tmp)
-            else:
-                tmp.write_bytes(self._cipher.decrypt_bytes(src.read_bytes()))
+            self._cipher.decrypt_file(src, tmp)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
         return tmp
 
 
-__all__ = ["CMainController", "ENCRYPTED_SUFFIX", "AES_TEXT_PREFIX", "EnvelopeError"]
+__all__ = ["CMainController", "ENCRYPTED_SUFFIX", "EnvelopeError"]
