@@ -1,30 +1,26 @@
-"""AC3 v2 — hardened multi-layer encryption, successor to the AC3 thesis algorithm.
+"""AC3-X (v3) — the thesis five-layer pipeline with an AES-256-CTR engine.
 
 Public surface:
-    AC3Cipher      — low-level cipher (bytes in/out, text or binary envelopes)
+    AC3Cipher       — low-level cipher (text envelope + chunked stream format)
     CMainController — application facade (strings, files)
-    exceptions     — AC3Error hierarchy
+    exceptions      — AC3Error hierarchy
 """
 
 from .core import AC3Cipher, VERSION
-from .aesgcm import AESGCMCipher
 from .controller import CMainController
 from .exceptions import (
     AC3Error,
     EnvelopeError,
     IntegrityError,
-    InvalidAlgorithmError,
     InvalidKeyError,
 )
 
 __all__ = [
     "AC3Cipher",
-    "AESGCMCipher",
     "CMainController",
     "VERSION",
     "AC3Error",
     "EnvelopeError",
     "IntegrityError",
-    "InvalidAlgorithmError",
     "InvalidKeyError",
 ]

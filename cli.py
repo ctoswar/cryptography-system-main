@@ -1,27 +1,26 @@
 #!/usr/bin/env python
-"""AC3 v2 command-line interface.
+"""AC3-X (v3) command-line interface.
 
 Usage:
-    python cli.py encrypt "message" [--algorithm ac3|aes]
-    python cli.py decrypt "AC3v2...."        # auto-detects the algorithm
-    python cli.py encrypt-file input.txt [output.ac3] [--algorithm ac3|aes]
-    python cli.py decrypt-file input.ac3 [output.txt]   # auto-detects
+    python cli.py encrypt "message"
+    python cli.py decrypt "AC3X...."
+    python cli.py encrypt-file input.txt [output.ac3] [--chunk-size N]
+    python cli.py decrypt-file input.ac3 [output.txt]
     python cli.py keygen
 
 Reading '-' as the input makes encrypt/decrypt pipe-friendly:
     echo "secret" | python cli.py encrypt -
 
-Algorithms:
-    ac3  the five-layer thesis scheme (default; the project's identity)
-    aes  AES-256-GCM — the NIST standard; hardware-accelerated, streams
-         large files in constant memory (the high-volume path)
+One algorithm: AC3-X — the five-layer thesis pipeline (framing, Caesar, XOR,
+transposition, XOR + HMAC) with an AES-256-CTR keystream engine and HMAC-SHA256
+integrity. Files stream in constant memory, so large files encrypt at disk speed.
 """
 
 import argparse
 import sys
 
 from ac3 import AC3Error, CMainController
-from ac3.aesgcm import DEFAULT_CHUNK_SIZE
+from ac3.core import DEFAULT_CHUNK_SIZE
 from ac3.keys import DEFAULT_ENV_PATH, MASTER_KEY_ENV, KeyManager
 
 
@@ -50,7 +49,7 @@ def _build_controller(args) -> CMainController:
 
 def cmd_encrypt(args) -> int:
     controller = _build_controller(args)
-    token = controller.encrypt(_read_input(args.message), algorithm=args.algorithm)
+    token = controller.encrypt(_read_input(args.message))
     print(token)
     return 0
 
@@ -63,10 +62,8 @@ def cmd_decrypt(args) -> int:
 
 def cmd_encrypt_file(args) -> int:
     controller = _build_controller(args)
-    out = controller.encrypt_file(
-        args.input, args.output, algorithm=args.algorithm, chunk_size=args.chunk_size
-    )
-    print(f"Encrypted ({args.algorithm}): {args.input} -> {out}")
+    out = controller.encrypt_file(args.input, args.output, chunk_size=args.chunk_size)
+    print(f"Encrypted: {args.input} -> {out}")
     return 0
 
 
@@ -96,7 +93,7 @@ def cmd_keygen(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ac3",
-        description="AC3 v2 — layered encryption with HMAC integrity.",
+        description="AC3-X (v3) — thesis five-layer pipeline with an AES-CTR engine.",
     )
     # Shared flag lives on each subcommand so `ac3 keygen --env x` reads naturally.
     common = argparse.ArgumentParser(add_help=False)
@@ -108,32 +105,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("encrypt", help="encrypt a text message", parents=[common])
     p.add_argument("message", help="plaintext, or '-' to read stdin")
-    p.add_argument(
-        "--algorithm",
-        choices=("ac3", "aes"),
-        default="ac3",
-        help="ac3 = five-layer thesis scheme (default); aes = AES-256-GCM standard",
-    )
     p.set_defaults(func=cmd_encrypt)
 
     p = sub.add_parser("decrypt", help="decrypt a ciphertext", parents=[common])
-    p.add_argument("message", help="AC3v2.../AC3A... token, or '-' to read stdin")
+    p.add_argument("message", help="AC3X... token, or '-' to read stdin")
     p.set_defaults(func=cmd_decrypt)
 
     p = sub.add_parser("encrypt-file", help="encrypt a file", parents=[common])
     p.add_argument("input")
     p.add_argument("output", nargs="?", help="default: <input>.ac3")
     p.add_argument(
-        "--algorithm",
-        choices=("ac3", "aes"),
-        default="ac3",
-        help="ac3 = five-layer (default); aes = AES-256-GCM streaming, best for large files",
-    )
-    p.add_argument(
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK_SIZE,
-        help=f"AES stream chunk size in bytes (default {DEFAULT_CHUNK_SIZE})",
+        help=f"stream chunk size in bytes (default {DEFAULT_CHUNK_SIZE})",
     )
     p.set_defaults(func=cmd_encrypt_file)
 
