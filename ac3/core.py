@@ -48,11 +48,11 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .envelope import decode_text, encode_text
+from .envelope import decode_classic, encode_text
 from .exceptions import AC3Error, EnvelopeError, IntegrityError, InvalidKeyError
-from .keys import MASTER_KEY_BYTES, KeyManager, _expand, _extract
+from .keys import MASTER_KEY_BYTES, KeyManager, _expand, _extract, key_id
 
-VERSION = 3
+VERSION = 4
 
 _FRAME_VERSION = 3
 _LENGTH_SIZE = 4
@@ -60,10 +60,13 @@ _MAX_PLAINTEXT = (1 << 32) - 1
 _COLUMNS = 8
 _MAC_SIZE = 32
 _NONCE_SIZE = 16
+_KEY_ID_SIZE = 4
 
 TEXT_PREFIX = "AC3X."
-STREAM_MAGIC = b"AC3X3\x01"
-HEADER_SIZE = len(STREAM_MAGIC) + _NONCE_SIZE + 4   # magic + nonce + chunk_size
+STREAM_MAGIC = b"AC3X3\x01"        # legacy header (no key ID)
+STREAM_MAGIC_V4 = b"AC3X4\x01"     # v4 header: magic + key ID + nonce + chunk_size
+HEADER_SIZE = len(STREAM_MAGIC_V4) + _KEY_ID_SIZE + _NONCE_SIZE + 4
+LEGACY_HEADER_SIZE = len(STREAM_MAGIC) + _NONCE_SIZE + 4
 FRAME_HEADER_SIZE = 1 + 4                           # flag + length
 DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024                # 4 MiB
 MAX_CHUNK_SIZE = 64 * 1024 * 1024
@@ -178,29 +181,59 @@ def _read_exact(src, size: int, what: str) -> bytes:
 # --------------------------------------------------------------------------
 
 class AC3Cipher:
-    """AC3-X (v3) cipher — five thesis layers over AES-CTR + HMAC-SHA256.
+    """AC3-X (v3/v4) cipher — five thesis layers over AES-CTR + HMAC-SHA256.
 
     Accepts a :class:`KeyManager`, a raw 32-byte master key, or nothing
     (auto-provisions from the project ``.env`` on first use).
+
+    v4: production paths embed a 4-byte key ID (``envelope`` last field /
+    ``AC3X4`` stream header) so decryption resolves the right key from the
+    archive after rotation. Legacy 3-part tokens and ``AC3X3`` streams remain
+    decryptable via active-then-archive fallback.
     """
 
     def __init__(self, key_source=None):
         if isinstance(key_source, KeyManager):
+            self._keys = key_source
             master = key_source.master_key
         elif isinstance(key_source, (bytes, bytearray)):
+            self._keys = None
             master = bytes(key_source)
             if len(master) != MASTER_KEY_BYTES:
                 raise InvalidKeyError(
                     f"Master key must be {MASTER_KEY_BYTES} bytes, got {len(master)}."
                 )
         elif key_source is None:
-            master = KeyManager().master_key
+            self._keys = KeyManager()
+            master = self._keys.master_key
         else:
             raise TypeError(
                 "key_source must be a KeyManager, bytes, or None; "
                 f"got {type(key_source).__name__}."
             )
         self._master = master
+
+    def _resolve_master(self, key_id_value):
+        """Resolve the long-term key named by an envelope key ID."""
+        if key_id_value == key_id(self._master):
+            return self._master
+        if self._keys is not None:
+            found = self._keys.lookup_by_key_id(key_id_value)
+            if found is not None:
+                return found
+        raise EnvelopeError(
+            "Encrypted with an unknown key version: the key that produced "
+            "this ciphertext is neither the active key nor in the archive."
+        )
+
+    def _legacy_candidates(self) -> list:
+        """Key candidates for legacy (key-ID-less) envelopes: active, then archive."""
+        candidates = [self._master]
+        if self._keys is not None and self._keys.manages_archive:
+            candidates += [
+                k for k in self._keys.all_keys().values() if k != self._master
+            ]
+        return candidates
 
     # -- str API (text envelope) ------------------------------------------
 
@@ -209,11 +242,12 @@ class AC3Cipher:
             raise TypeError(f"encrypt() expects str, got {type(text).__name__}.")
         nonce = secrets.token_bytes(_NONCE_SIZE)
         body, tag = self._seal(text.encode("utf-8"), nonce)
-        return encode_text(nonce, body, tag, prefix=TEXT_PREFIX)
+        # v4: embed the key ID so rotation never orphans this ciphertext.
+        return encode_text([nonce, body, tag, key_id(self._master)], prefix=TEXT_PREFIX)
 
     def decrypt(self, token: str) -> str:
-        nonce, body, tag = decode_text(token, prefix=TEXT_PREFIX)
-        plain = self._open(nonce, body, tag)
+        nonce, body, tag, key_id_value = decode_classic(token)
+        plain = self._decrypt_core(nonce, body, tag, key_id_value)
         try:
             return plain.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -223,6 +257,22 @@ class AC3Cipher:
             raise EnvelopeError(
                 "Decrypted plaintext is not valid UTF-8."
             ) from exc
+
+    def _decrypt_core(self, nonce: bytes, body: bytes, tag: bytes,
+                      key_id_value) -> bytes:
+        """Decrypt with key resolution: explicit ID, or legacy fallback."""
+        if key_id_value is not None:
+            master = self._resolve_master(key_id_value)
+            return self._open(nonce, body, tag, master)
+        # Legacy key-ID-less envelope: active key first, then archive
+        # entries (the MAC decides; a wrong key is an IntegrityError).
+        last_error = None
+        for candidate in self._legacy_candidates():
+            try:
+                return self._open(nonce, body, tag, candidate)
+            except IntegrityError as exc:
+                last_error = exc
+        raise last_error
 
     # -- bytes API (stream envelope, in memory) ----------------------------
 
@@ -249,6 +299,9 @@ class AC3Cipher:
         Constant memory: at most `chunk_size` + framing overhead is held.
         `nonce` exists ONLY for SPEC conformance vectors — it must be random
         per message in production (reuse catastrophically weakens CTR).
+
+        v4: the header is the ``AC3X4`` magic + 4-byte key ID, so rotated
+        archives resolve correctly on decrypt.
         """
         if not 1 <= chunk_size <= MAX_CHUNK_SIZE:
             raise AC3Error(f"chunk_size must be 1..{MAX_CHUNK_SIZE} bytes.")
@@ -256,7 +309,8 @@ class AC3Cipher:
         if len(nonce) != _NONCE_SIZE:
             raise AC3Error(f"nonce must be {_NONCE_SIZE} bytes.")
         ks = _KeySchedule(self._master, nonce, domain=b"stream")
-        header = STREAM_MAGIC + nonce + chunk_size.to_bytes(4, "big")
+        header = (STREAM_MAGIC_V4 + key_id(self._master) + nonce
+                  + chunk_size.to_bytes(4, "big"))
 
         mac = hmac.HMAC(ks.mac_key, hashes.SHA256())
         mac.update(header)
@@ -295,16 +349,57 @@ class AC3Cipher:
         truncation, splicing, flag flips, and trailing data all fail. The
         final tag verifies before the caller should trust `dst` — the
         controller stages to a temp file and commits only on success.
+
+        Accepts both header generations: ``AC3X4`` (with key ID, v4 — single
+        key candidate, fully streaming) and the legacy ``AC3X3`` (resolved
+        via active-then-archive fallback; that retry path buffers the source
+        in memory, a bounded cost of the pre-v4 migration path).
         """
-        header = _read_exact(src, HEADER_SIZE, "header")
-        if not header.startswith(STREAM_MAGIC):
+        magic = _read_exact(src, len(STREAM_MAGIC_V4), "magic")
+        if magic == STREAM_MAGIC_V4:
+            key_id_field = _read_exact(src, _KEY_ID_SIZE, "key ID")
+            candidates = [self._resolve_master(key_id_field)]
+            header_prefix = magic + key_id_field
+        elif magic == STREAM_MAGIC:
+            key_id_field = None
+            candidates = self._legacy_candidates()
+            header_prefix = magic
+        else:
             raise EnvelopeError("Stream is missing the AC3-X header.")
-        nonce = header[len(STREAM_MAGIC):len(STREAM_MAGIC) + _NONCE_SIZE]
-        chunk_size = int.from_bytes(header[len(STREAM_MAGIC) + _NONCE_SIZE:], "big")
+        nonce = _read_exact(src, _NONCE_SIZE, "nonce")
+        chunk_size_raw = _read_exact(src, 4, "chunk size")
+        chunk_size = int.from_bytes(chunk_size_raw, "big")
         if not 1 <= chunk_size <= MAX_CHUNK_SIZE:
             raise EnvelopeError(f"Stream declares invalid chunk size {chunk_size}.")
+        header = header_prefix + nonce + chunk_size_raw
 
-        ks = _KeySchedule(self._master, nonce, domain=b"stream")
+        if len(candidates) == 1:
+            return self._decrypt_stream_body(src, dst, header, chunk_size,
+                                             candidates[0], nonce)
+
+        # Legacy multi-candidate retry: buffer the frame region once, decrypt
+        # each attempt to a scratch buffer, commit only the successful one —
+        # a failed candidate must never leave partial output in `dst`.
+        rest = src.read()
+        last_error = None
+        for candidate in candidates:
+            scratch = io.BytesIO()
+            try:
+                written = self._decrypt_stream_body(
+                    io.BytesIO(rest), scratch, header, chunk_size, candidate, nonce
+                )
+            except IntegrityError as exc:
+                last_error = exc
+                continue
+            dst.write(scratch.getvalue())
+            return written
+        raise last_error
+
+    def _decrypt_stream_body(self, src, dst, header: bytes, chunk_size: int,
+                             master: bytes, nonce: bytes) -> int:
+        """One key candidate's pass over the frames. Raises IntegrityError if
+        the final stream tag fails under this key."""
+        ks = _KeySchedule(master, nonce, domain=b"stream")
         mac = hmac.HMAC(ks.mac_key, hashes.SHA256())
         mac.update(header)
 
@@ -392,8 +487,8 @@ class AC3Cipher:
         mac.update(bytes([_FRAME_VERSION]) + nonce + body)
         return body, mac.finalize()
 
-    def _open(self, nonce: bytes, body: bytes, tag: bytes) -> bytes:
-        ks = _KeySchedule(self._master, nonce)
+    def _open(self, nonce: bytes, body: bytes, tag: bytes, master: bytes | None = None) -> bytes:
+        ks = _KeySchedule(master if master is not None else self._master, nonce)
 
         # Verify BEFORE decrypting (constant-time via cryptography's hmac).
         mac = hmac.HMAC(ks.mac_key, hashes.SHA256())
@@ -428,13 +523,14 @@ class AC3Cipher:
 
         For SPEC.md conformance vectors and cross-implementation tests only.
         Never use in production: reusing a nonce across messages reuses CTR
-        keystreams and is catastrophic.
+        keystreams and is catastrophic. Emits the legacy 3-part shape (no key
+        ID) — the cryptographic core without key-management metadata.
         """
         if not isinstance(nonce, (bytes, bytearray)) or len(nonce) != _NONCE_SIZE:
             raise AC3Error(f"nonce must be exactly {_NONCE_SIZE} bytes.")
         nonce = bytes(nonce)
         body, tag = self._seal(bytes(data), nonce)
-        return encode_text(nonce, body, tag, prefix=TEXT_PREFIX)
+        return encode_text([nonce, body, tag], prefix=TEXT_PREFIX)
 
 
-__all__ = ["AC3Cipher", "VERSION", "TEXT_PREFIX", "STREAM_MAGIC"]
+__all__ = ["AC3Cipher", "VERSION", "TEXT_PREFIX", "STREAM_MAGIC", "STREAM_MAGIC_V4"]

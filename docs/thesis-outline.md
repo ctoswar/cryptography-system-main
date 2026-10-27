@@ -131,15 +131,25 @@ ordering is normative in the specification.
    AES-CTR + HMAC; they are retained for continuity with the thesis design and
    act as keyed structural whitening. Any formal analysis should treat AC3-X
    as AES-CTR + HMAC with additional keyed transforms.
-2. The scheme has not been independently audited; the three audit rounds
+2. The scheme has not been independently audited; the four audit rounds
    documented in this repository were performed by the author with automated
    tooling (bandit, pip-audit, a custom escape fuzzer) and manual review.
-3. No forward secrecy and no key exchange: compromise of the `.env` master key
-   reveals all data encrypted under it. Nonce reuse is catastrophic (CTR).
-4. Statistical tests (entropy, chi-square) detect gross non-randomness only;
+3. **No forward secrecy — a design decision, not an oversight.** True FS
+   requires destroying past key material, which conflicts with the project's
+   founding principle of permanent decryptability (the cure for v1's
+   orphaning flaw). v4's session mode (`AC3E.`) delivers **key separation**
+   (compromise requires both the master key and the static X25519 private
+   key) and public-key encryption, but not strict FS; a symmetric-ratchet
+   mode (strict FS at the cost of permanent decryptability) is the documented
+   future-work trade-off.
+4. Nonce reuse in classic mode is catastrophic (CTR); the SIV mode exists
+   precisely for deployments that cannot guarantee nonce uniqueness.
+5. Statistical tests (entropy, chi-square) detect gross non-randomness only;
    passing them does not prove cryptographic security.
-5. Benchmarks reflect a single machine and CPython; absolute numbers vary by
+6. Benchmarks reflect a single machine and CPython; absolute numbers vary by
    environment (the recorded environment is captured in the results JSON).
+7. CPython cannot guarantee zeroization of discarded secrets (ephemeral
+   session keys).
 
 ## 6. Suggested contributions statement
 
@@ -155,6 +165,14 @@ ordering is normative in the specification.
    ciphertext properties.
 5. A documented three-round adversarial audit methodology with all findings,
    fixes, and regression tests published in the repository history.
+6. **A fourth, design-level audit round (v4)**: after the implementation was
+   hardened, the design's own documented weaknesses were systematically
+   remediated — versioned key rotation (never orphaning history), an
+   RFC 5297 misuse-resistant mode for nonces, and an RFC 7748 X25519 session
+   mode delivering key separation and public-key encryption — together with
+   an explicit analysis of why strict forward secrecy conflicts with the
+   design's permanent-decryptability principle, and what a ratchet mode
+   would cost.
 
 ## 7. How to regenerate every number in this document
 

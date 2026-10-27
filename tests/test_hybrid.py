@@ -26,6 +26,7 @@ from ac3.core import (
     HEADER_SIZE,
     MAX_CHUNK_SIZE,
     STREAM_MAGIC,
+    STREAM_MAGIC_V4,
     TEXT_PREFIX,
     VERSION,
 )
@@ -82,9 +83,14 @@ def test_text_tamper_tag_rejected(cipher):
 
 
 def test_text_wrong_key_rejected(cipher):
+    from ac3.exceptions import EnvelopeError
+
     token = cipher.encrypt("secret")
     other = AC3Cipher(secrets.token_bytes(32))
-    with pytest.raises(IntegrityError):
+    # A token from a different deployment carries a key ID this cipher does
+    # not recognize — that is an envelope/key-management error, distinct
+    # from same-key tampering (which raises IntegrityError).
+    with pytest.raises(EnvelopeError, match="unknown key version"):
         other.decrypt(token)
 
 
@@ -122,17 +128,75 @@ def test_different_nonces_give_different_ciphertexts(cipher):
 def test_stream_roundtrip(cipher, size, chunk):
     data = secrets.token_bytes(size)
     blob = cipher.encrypt_bytes(data, chunk_size=chunk)
-    assert blob[: len(STREAM_MAGIC)] == STREAM_MAGIC
+    assert blob[: len(STREAM_MAGIC_V4)] == STREAM_MAGIC_V4
     assert cipher.decrypt_bytes(blob) == data
 
 
 def test_stream_header_layout(cipher):
     blob = cipher.encrypt_bytes(b"data", chunk_size=1024)
-    assert blob[:6] == STREAM_MAGIC
-    nonce = blob[6:22]
-    declared = struct.unpack(">I", blob[22:26])[0]
-    assert len(nonce) == 16 and declared == 1024
-    assert HEADER_SIZE == 26
+    assert blob[:6] == STREAM_MAGIC_V4
+    key_id_field = blob[6:10]
+    nonce = blob[10:26]
+    declared = struct.unpack(">I", blob[26:30])[0]
+    assert len(key_id_field) == 4 and len(nonce) == 16 and declared == 1024
+    assert HEADER_SIZE == 30
+
+
+def test_legacy_stream_still_decrypts(cipher):
+    """Pre-v4 AC3X3 streams (no key ID) decrypt via the legacy fallback.
+
+    Built genuinely: v4 frames are byte-identical to what the legacy format
+    would produce (same key schedule, same nonce) — only the header and its
+    MAC differ, so the legacy stream is re-MACed over the legacy header.
+    """
+    from cryptography.hazmat.primitives import hashes, hmac as _hmac
+
+    from ac3.core import (
+        LEGACY_HEADER_SIZE,
+        STREAM_MAGIC,
+        _KeySchedule,
+        DEFAULT_CHUNK_SIZE,
+    )
+
+    data = b"pre-v4 stream content" * 20
+    nonce = secrets.token_bytes(16)
+    ks = _KeySchedule(cipher._master, nonce, domain=b"stream")
+    chunk_size = 128
+    header = STREAM_MAGIC + nonce + chunk_size.to_bytes(4, "big")
+    mac = _hmac.HMAC(ks.mac_key, hashes.SHA256())
+    mac.update(header)
+
+    frames = io.BytesIO()
+    src = io.BytesIO(data)
+    chunks = []
+    while True:
+        piece = src.read(chunk_size)
+        if not piece:
+            break
+        chunks.append(piece)
+    for index, chunk in enumerate(chunks):
+        flag = 1 if index == len(chunks) - 1 else 0
+        processed = cipher._transform_chunk(chunk, ks, index)
+        frame = bytes([flag]) + len(processed).to_bytes(4, "big") + processed
+        mac.update(frame)
+        frames.write(frame)
+    legacy_stream = header + frames.getvalue() + mac.finalize()
+    assert len(header) == LEGACY_HEADER_SIZE
+
+    back = io.BytesIO()
+    cipher.decrypt_stream(io.BytesIO(legacy_stream), back)
+    assert back.getvalue() == data
+
+
+def test_stream_header_downgrade_is_tamper_evident(cipher):
+    """The header is inside the MAC: flipping a v4 stream to the legacy
+    magic (even stripping the key ID consistently) must fail authentication."""
+    data = b"downgrade attempt" * 10
+    blob = bytearray(cipher.encrypt_bytes(data, chunk_size=128))
+    blob[3] = ord("3")  # AC3X4 -> AC3X3
+    legacy_attempt = bytes(blob[:6]) + bytes(blob[10:])
+    with pytest.raises((IntegrityError, EnvelopeError)):
+        cipher.decrypt_bytes(legacy_attempt)
 
 
 def test_stream_chunk_size_bounds(cipher):
@@ -350,9 +414,9 @@ def test_spec_vector_stream_multichunk():
         nonce=VECTOR_NONCE,
     )
     assert out.getvalue().hex() == (
-        "41433358330100112233445566778899aabbccddeeff00000008000000000884479d6de69f121f"
-        "0000000008f6d2032b063f38b000000000081ce4f663705f7b380100000003c9687cd75f72b4f25"
-        "3c3ccd2500c334478ced2a6087751c37400f0613774e809a613f4"
+        "414333583401651c403700112233445566778899aabbccddeeff00000008000000000884479d6de69f121f"
+        "0000000008f6d2032b063f38b000000000081ce4f663705f7b380100000003c9687ca0f40245534db8bf10"
+        "a4246a79233c3b6e6fc478d41080c456ea11ff4cf1533a"
     )
 
 

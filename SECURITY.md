@@ -47,15 +47,35 @@ These are documented on purpose and are not considered vulnerabilities:
 - The layered construction wraps standard primitives but is **not** a vetted
   AEAD and has not been peer-reviewed; treat AC3-X as AES-CTR + HMAC with
   extra keyed transforms.
-- **Nonce reuse is catastrophic** (CTR keystream reuse). The implementation
-  generates a fresh random 16-byte nonce per message; fixed-nonce paths exist
-  solely for conformance vectors and must never be used on real data.
-- No forward secrecy; compromise of the `.env` master key reveals all data
-  encrypted under it.
-- No authenticated key exchange; the master key must be distributed out of band.
+- **Nonce reuse is catastrophic in classic mode** (CTR keystream reuse). The
+  implementation generates a fresh random 16-byte nonce per message; the
+  fixed-nonce path exists solely for conformance vectors. v4 adds the **SIV
+  mode** (`AC3S.`) where nonce reuse degrades to deterministic encryption —
+  prefer it when nonce uniqueness cannot be guaranteed.
+- **No forward secrecy** — and this is a *design decision*, not an oversight:
+  true FS requires destroying past key material, which conflicts with the
+  project's founding principle of permanent decryptability. v4's **session
+  mode** (`AC3E.`) delivers key separation (compromise requires both the
+  master key and the static X25519 private key) and public-key encryption,
+  but an attacker holding both long-term secrets and a recorded envelope can
+  still recompute its session key. A symmetric-ratchet mode (strict FS,
+  deliberately non-permanent decryptability) is documented as future work.
+- No authenticated key exchange between distinct parties; session-mode
+  handshake authentication presumes the shared master of the symmetric
+  deployment. Cross-party signatures (Ed25519) are future work.
+- CPython cannot guarantee zeroization of discarded secrets (ephemeral
+  session keys).
 - Streaming decrypt produces plaintext chunks before the final stream tag
   verifies (inherent to streaming MACs). The reference implementation stages
   output and commits it atomically only after the tag verifies.
+
+## Mode summary (v4)
+
+| Mode | Envelope | Standard | Answers |
+|---|---|---|---|
+| classic | `AC3X.[n.b.t.[keyid]]` | AES-256-CTR + HMAC-SHA256 + HKDF | the thesis identity; rotation-safe |
+| siv | `AC3S.[n12.output.[keyid]]` | RFC 5297 AES-SIV-CMAC-512 | nonce-misuse resistance |
+| session | `AC3E.[epk.salt.n.body.mac.[keyid]]` | RFC 7748 X25519 + the classic core | key separation; public-key encryption |
 
 ## What the stream format defends against
 
