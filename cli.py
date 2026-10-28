@@ -62,8 +62,10 @@ def cmd_decrypt(args) -> int:
 
 def cmd_encrypt_file(args) -> int:
     controller = _build_controller(args)
-    out = controller.encrypt_file(args.input, args.output, chunk_size=args.chunk_size)
-    print(f"Encrypted: {args.input} -> {out}")
+    out = controller.encrypt_file(
+        args.input, args.output, mode=args.mode, chunk_size=args.chunk_size
+    )
+    print(f"Encrypted ({args.mode}): {args.input} -> {out}")
     return 0
 
 
@@ -127,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("encrypt-file", help="encrypt a file", parents=[common])
     p.add_argument("input")
     p.add_argument("output", nargs="?", help="default: <input>.ac3")
+    p.add_argument(
+        "--mode",
+        choices=("fips", "classic"),
+        default="fips",
+        help="fips = AES-256-GCM (default); classic = five-layer thesis scheme",
+    )
     p.add_argument(
         "--chunk-size",
         type=int,
