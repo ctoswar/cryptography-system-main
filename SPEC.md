@@ -298,3 +298,56 @@ parallel execution is a documented future direction, not implemented).
 Latency for small messages (~0.11 ms p50) is dominated by the per-message
 HKDF schedule and two CTR context setups. SIV mode adds one CMAC pass;
 session mode adds one X25519 operation plus one HKDF per message.
+
+## 9. FIPS mode (v5) - the production layer
+
+New envelope families `AC3F.<nonce12>.<output>[.<keyid>]` (text) and the
+`AC3F1` chunked stream (files), with **zero custom cryptographic
+construction**: every cryptographic operation is a FIPS-approved algorithm in
+a NIST-specified mode.
+
+```
+text    key    = HKDF-SHA256(master, salt = nonce12, info = "ac3x/fips/v1/key", 32)
+        output = AES-256-GCM(key, nonce12, aad = "AC3F" || keyid)
+        AC3F.<nonce12>.<output>[.<keyid>]
+
+stream  header = "AC3F1" || keyid(4) || salt(16) || nonce_prefix(8) || chunk_size(4)
+        per chunk: nonce = nonce_prefix(8) || counter(4); aad = header || index(8) || flag
+        sealed = AES-256-GCM(stream_key, nonce, aad, chunk)
+        stream_key = HKDF-SHA256(master, salt, "ac3x/fips/v1/stream", 32)
+```
+
+| Component | FIPS/NIST status |
+|---|---|
+| AES-256-GCM | AES per FIPS 197; GCM per NIST SP 800-38D |
+| HKDF-SHA256 | NIST SP 800-56C Rev 2 |
+| HMAC-SHA256 (key IDs) | FIPS 198-1 |
+| Envelope framing | non-cryptographic metadata |
+
+**Approved is not validated (must be stated).** FIPS 140-3 validation is a
+CMVP certification of a specific implementation - no Python library
+qualifies. The precise claim: *uses FIPS-approved algorithms in
+NIST-specified modes, structured so a future module validation of the
+primitive layer would cover all cryptographic operations.*
+
+**Documented trade-off - key commitment.** GCM is not key-committing
+(Bellare & Hoang 2022, ePrint 2022/268; NDSS 2022 partitioning-oracle
+literature). Classic and SIV modes retain commitment; the FIPS mode trades
+it for maximal algorithmic standardness. SP 800-38D bounds are satisfied:
+per-message/per-stream HKDF-derived keys mean each GCM key encrypts exactly
+one message (or one stream with a 96-bit nonce space).
+
+**AAD binding:** the key ID is inside the GCM AAD - keyid substitution (even
+for a key the deployment knows) fails authentication. Chunk AADs bind the
+full header plus chunk index and flag, so reordering, truncation, splicing,
+flag flips, and trailing data all fail.
+
+**Performance:** GCM fuses authentication into the encryption pass (GHASH,
+hardware-accelerated) - one pass instead of the classic five. Measured:
+387 MB/s encrypt, 532 MB/s decrypt on the reference environment (100 MB
+file, constant ~13 MB memory) - about 2.5x the classic pipeline.
+
+**Mode position:** FIPS mode is the production/default layer. The classic
+five-layer pipeline (`AC3X`) remains unchanged as the explicitly-labeled
+custom construction - the thesis identity whose security argument is
+educational, sitting beside a core whose every operation is citable.

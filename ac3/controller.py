@@ -28,6 +28,7 @@ from pathlib import Path
 
 from .core import AC3Cipher
 from .exceptions import AC3Error, EnvelopeError, InvalidKeyError
+from .fips import FIPSCipher
 from .keys import DEFAULT_ENV_PATH, KeyManager
 from .session import SessionCipher
 from .siv import SIVTextCipher
@@ -36,7 +37,7 @@ logger = logging.getLogger("ac3")
 
 ENCRYPTED_SUFFIX = ".ac3"
 
-MODES = ("classic", "siv", "session")
+MODES = ("fips", "classic", "siv", "session")
 
 
 class CMainController:
@@ -51,6 +52,7 @@ class CMainController:
             self._keys = key_manager or KeyManager(env_path)
             self._cipher = AC3Cipher(self._keys)
         self._siv = SIVTextCipher(self._cipher)
+        self._fips = FIPSCipher(self._cipher)
         self._session = None  # lazily built: requires an env-backed key store
 
     def _session_cipher(self) -> SessionCipher:
@@ -67,9 +69,11 @@ class CMainController:
 
     # -- text ---------------------------------------------------------------
 
-    def encrypt(self, text: str, mode: str = "classic") -> str:
-        """Encrypt text in one of the three modes (classic by default)."""
-        if mode == "siv":
+    def encrypt(self, text: str, mode: str = "fips") -> str:
+        """Encrypt text in one of the four modes (FIPS by default)."""
+        if mode == "fips":
+            token = self._fips.encrypt(text)
+        elif mode == "siv":
             token = self._siv.encrypt(text)
         elif mode == "session":
             token = self._session_cipher().encrypt(text, self._recipient_pub())
@@ -91,6 +95,9 @@ class CMainController:
         elif token.startswith("AC3E."):
             text = self._session_cipher().decrypt(token)
             mode = "session"
+        elif token.startswith("AC3F."):
+            text = self._fips.decrypt(token)
+            mode = "fips"
         else:
             text = self._cipher.decrypt(token)
             mode = "classic"
@@ -154,17 +161,27 @@ class CMainController:
             base = name + ".decrypted"
         return source.with_name(base)
 
-    def encrypt_file(self, source, target=None, chunk_size: int | None = None) -> Path:
+    def encrypt_file(self, source, target=None, mode: str = "fips",
+                     chunk_size: int | None = None) -> Path:
         """Encrypt a file with the chunked stream format (constant memory)."""
+        if mode in ("siv", "session"):
+            raise AC3Error(
+                f"Mode {mode!r} is text-only; use 'fips' or 'classic' for files."
+            )
         src = Path(source)
         if not src.is_file():
             raise AC3Error(f"Input file not found: {src}")
         dst = Path(target) if target else self._default_encrypt_target(src)
         kwargs = {"chunk_size": chunk_size} if chunk_size is not None else {}
-        size = self._atomic_write(
-            dst, lambda tmp: self._cipher.encrypt_file(src, tmp, **kwargs)
-        )
-        logger.info("encrypted file: %s -> %s (%d bytes)", src, dst, size)
+        if mode == "fips":
+            size = self._atomic_write(
+                dst, lambda tmp: self._fips.encrypt_file(src, tmp, **kwargs)
+            )
+        else:
+            size = self._atomic_write(
+                dst, lambda tmp: self._cipher.encrypt_file(src, tmp, **kwargs)
+            )
+        logger.info("encrypted file [%s]: %s -> %s (%d bytes)", mode, src, dst, size)
         return dst
 
     def decrypt_file(self, source, target=None) -> Path:
@@ -172,20 +189,24 @@ class CMainController:
         src = Path(source)
         if not src.is_file():
             raise AC3Error(f"Input file not found: {src}")
+        with src.open("rb") as probe:
+            stream_magic = probe.read(6)
+        fips_mode = stream_magic == b"AC3F1\x01"
+        mode = "fips" if fips_mode else "classic"
 
         if target:
             dst = Path(target)  # explicit path: user intent is clear
-            self._decrypt_file_to(src, dst)
+            self._decrypt_file_to(src, dst, fips_mode)
             logger.info(
-                "decrypted file: %s -> %s (%d bytes)",
-                src, dst, dst.stat().st_size,
+                "decrypted file [%s]: %s -> %s (%d bytes)",
+                mode, src, dst, dst.stat().st_size,
             )
             return dst
 
         dst = self._default_decrypt_target(src)
         if dst.exists():
             # Stage the plaintext, then compare: never destroy differing data.
-            staged = self._decrypt_file_to_temp(src)
+            staged = self._decrypt_file_to_temp(src, fips_mode)
             try:
                 if dst.read_bytes() == staged.read_bytes():
                     logger.info("decrypted content already present: %s", dst)
@@ -197,14 +218,14 @@ class CMainController:
             finally:
                 staged.unlink(missing_ok=True)
 
-        self._decrypt_file_to(src, dst)
+        self._decrypt_file_to(src, dst, fips_mode)
         logger.info(
-            "decrypted file: %s -> %s (%d bytes)",
-            src, dst, dst.stat().st_size,
+            "decrypted file [%s]: %s -> %s (%d bytes)",
+            mode, src, dst, dst.stat().st_size,
         )
         return dst
 
-    def _decrypt_file_to(self, src: Path, dst: Path) -> None:
+    def _decrypt_file_to(self, src: Path, dst: Path, fips_mode: bool) -> None:
         """Write decrypted plaintext of `src` to `dst` atomically.
 
         Staged in a sibling temp file and renamed into place only after the
@@ -213,9 +234,12 @@ class CMainController:
         IntegrityError) and, for an explicit target, would truncate the
         pre-existing file before failing.
         """
-        self._atomic_write(dst, lambda tmp: self._cipher.decrypt_file(src, tmp))
+        if fips_mode:
+            self._atomic_write(dst, lambda tmp: self._fips.decrypt_file(src, tmp))
+        else:
+            self._atomic_write(dst, lambda tmp: self._cipher.decrypt_file(src, tmp))
 
-    def _decrypt_file_to_temp(self, src: Path) -> Path:
+    def _decrypt_file_to_temp(self, src: Path, fips_mode: bool) -> Path:
         """Decrypt into a fresh sibling temp file (for no-clobber comparison)."""
         fd, tmp_name = tempfile.mkstemp(
             prefix=".ac3tmp-", dir=str(src.parent)
@@ -223,7 +247,10 @@ class CMainController:
         os.close(fd)
         tmp = Path(tmp_name)
         try:
-            self._cipher.decrypt_file(src, tmp)
+            if fips_mode:
+                self._fips.decrypt_file(src, tmp)
+            else:
+                self._cipher.decrypt_file(src, tmp)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise

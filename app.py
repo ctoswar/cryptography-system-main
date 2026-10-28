@@ -163,8 +163,8 @@ def index():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "version": 4, "algorithm": "ac3x",
-                    "modes": ["classic", "siv", "session"]})
+    return jsonify({"status": "ok", "version": 5, "algorithm": "ac3x",
+                    "modes": ["fips", "classic", "siv", "session"]})
 
 
 def _check_json_content_type():
@@ -198,10 +198,10 @@ def encrypt_message():
     message = data.get("message")
     if not isinstance(message, str) or message == "":
         return jsonify({"error": "Missing or empty 'message' parameter"}), 400
-    mode = data.get("mode", "classic")
-    if not isinstance(mode, str) or mode.lower() not in {"classic", "siv", "session"}:
+    mode = data.get("mode", "fips")
+    if not isinstance(mode, str) or mode.lower() not in {"fips", "classic", "siv", "session"}:
         return (
-            jsonify({"error": f"Unknown mode {mode!r}; expected 'classic', 'siv', or 'session'."}),
+            jsonify({"error": f"Unknown mode {mode!r}; expected 'fips', 'classic', 'siv', or 'session'."}),
             400,
         )
     mode = mode.lower()
