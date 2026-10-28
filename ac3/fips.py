@@ -98,7 +98,12 @@ class FIPSCipher:
     """
 
     def __init__(self, key_source=None):
-        if isinstance(key_source, AC3Cipher):
+        if hasattr(key_source, "_master") and hasattr(key_source, "_keys"):
+            # any sibling cipher (AC3Cipher, FIPSCipher, SIVTextCipher...)
+            # sharing the same master — duck-typed to avoid import cycles
+            self._master = key_source._master
+            self._keys = key_source._keys
+        elif isinstance(key_source, AC3Cipher):
             self._master = key_source._master
             self._keys = key_source._keys
         else:
