@@ -28,7 +28,7 @@ def test_encrypt_decrypt_roundtrip(client):
     res = client.post("/encrypt", json={"message": "hello thesis 👋"})
     assert res.status_code == 200
     token = res.get_json()["ciphertext"]
-    assert token.startswith("AC3X.")
+    assert token.startswith("AC3F.")  # FIPS is the default mode
 
     res = client.post("/decrypt", json={"ciphertext": token})
     assert res.status_code == 200

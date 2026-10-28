@@ -26,9 +26,12 @@ from .exceptions import EnvelopeError
 TEXT_PREFIX = "AC3X."
 SIV_PREFIX = "AC3S."
 SESSION_PREFIX = "AC3E."
+FIPS_PREFIX = "AC3F."
 NONCE_SIZE = 16
 TAG_SIZE = 32
 KEY_ID_SIZE = 4
+FIPS_NONCE_SIZE = 12
+FIPS_TAG_SIZE = 16
 
 # Unpadded base64url alphabet only. Python's decoder discards unknown
 # characters by default, which would make token strings malleable
@@ -201,6 +204,35 @@ def _session_key_id(decoded, index):
             raise EnvelopeError(f"Key ID must be {KEY_ID_SIZE} bytes.")
         return key_id_value
     return None
+
+
+def decode_fips(token: str):
+    """Parse ``AC3F.<nonce12>.<ct+tag>[.<keyid>]``.
+
+    ``output`` = GCM ciphertext with the 16-byte tag appended.
+    Returns (nonce, output, key_id_or_None). The key-ID-less 2-field shape
+    is accepted for completeness (resolves via active-then-archive).
+    """
+    if not isinstance(token, str) or not token.startswith(FIPS_PREFIX):
+        _reject_legacy(token)
+        raise EnvelopeError(f"Ciphertext must start with '{FIPS_PREFIX}'.")
+    raw_fields = token[len(FIPS_PREFIX):].split(".")
+    if len(raw_fields) not in (2, 3):
+        raise EnvelopeError(
+            f"Ciphertext must have the form {FIPS_PREFIX}nonce.output[.keyid]."
+        )
+    decoded = [_b64d(part, f"FIPS field {i + 1}") for i, part in enumerate(raw_fields)]
+    nonce, output = decoded[0], decoded[1]
+    if len(nonce) != FIPS_NONCE_SIZE:
+        raise EnvelopeError(f"FIPS nonce must be {FIPS_NONCE_SIZE} bytes.")
+    if len(output) < FIPS_TAG_SIZE:
+        raise EnvelopeError("FIPS output is truncated (missing GCM tag).")
+    key_id_value = None
+    if len(raw_fields) == 3:
+        key_id_value = decoded[2]
+        if len(key_id_value) != KEY_ID_SIZE:
+            raise EnvelopeError(f"Key ID must be {KEY_ID_SIZE} bytes.")
+    return nonce, output, key_id_value
 
 
 def decode_text(token: str):

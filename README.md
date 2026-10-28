@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)
-![Tests](https://img.shields.io/badge/tests-173%20passing-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-206%20passing-brightgreen.svg)
 ![pip-audit](https://img.shields.io/badge/dependencies-0%20CVEs-brightgreen.svg)
 
 The **"AC3 level 5 Encryption Algorithm with Caesar Cipher and XOR Cipher"**
@@ -24,6 +24,7 @@ confidentiality path — see the honest scope note below).
 | **classic** | `AC3X.<n>.<b>.<t>[.<keyid>]` | AES-256-CTR + HMAC-SHA256 + HKDF | files, general use, rotation-safe |
 | **siv** | `AC3S.<n12>.<output>` | RFC 5297 AES-SIV-CMAC-512 | when nonce uniqueness can't be guaranteed |
 | **session** | `AC3E.<epk>.<salt>.<n>.<b>.<mac>` | RFC 7748 X25519 + the classic core | encrypting without sharing the master key |
+| **fips** (default) | `AC3F.<n12>.<output>` | FIPS 197 + SP 800-38D + SP 800-56C | production: pure AES-256-GCM, ~2.5x faster, no custom layers |
 
 The session mode's key agreement is **RFC 9180 HPKE-conformant** — verified
 byte-for-byte against the RFC's published A.7.1 test vectors — and every design

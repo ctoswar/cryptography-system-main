@@ -155,17 +155,23 @@ def test_json_body_must_be_object(client):
 # AC3-X single-mode API surface
 # --------------------------------------------------------------------------
 
-def test_encrypt_produces_ac3x_envelope(client):
-    res = client.post("/encrypt", json={"message": "hybrid path"})
+def test_encrypt_produces_fips_envelope_by_default(client):
+    res = client.post("/encrypt", json={"message": "production path"})
+    assert res.status_code == 200
+    assert res.get_json()["ciphertext"].startswith("AC3F.")
+
+
+def test_classic_mode_still_available(client):
+    res = client.post("/encrypt", json={"message": "thesis path", "mode": "classic"})
     assert res.status_code == 200
     assert res.get_json()["ciphertext"].startswith("AC3X.")
 
 
 def test_algorithm_field_is_ignored(client):
-    """v3 has one algorithm; a stale client sending 'algorithm' still succeeds."""
+    """Stale clients sending 'algorithm' still succeed; 'mode' is the field."""
     res = client.post("/encrypt", json={"message": "x", "algorithm": "aes"})
     assert res.status_code == 200
-    assert res.get_json()["ciphertext"].startswith("AC3X.")
+    assert res.get_json()["ciphertext"].startswith("AC3F.")
 
 
 def test_tampered_token_rejected(client):
