@@ -76,7 +76,7 @@ These are documented on purpose and are not considered vulnerabilities:
 | classic | `AC3X.[n.b.t.[keyid]]` | AES-256-CTR + HMAC-SHA256 + HKDF | the thesis identity; rotation-safe |
 | siv | `AC3S.[n12.output.[keyid]]` | RFC 5297 AES-SIV-CMAC-512 | nonce-misuse resistance |
 | session | `AC3E.[epk.salt.n.body.mac.[keyid]]` | RFC 7748 X25519 + the classic core | key separation; public-key encryption |
-| fips | `AC3F.[n12.output.[keyid]]` | FIPS 197 + SP 800-38D + SP 800-56C | production claims (GCM is not key-committing - documented trade-off) |
+| fips | `AC3F.[n12.output.[keyid]]` | FIPS 197 + SP 800-38D + SP 800-56C (+ FIPS 198-1 commitment tag) | production claims; key-committing via the v5.1 commitment tag |
 
 ## What the stream format defends against
 

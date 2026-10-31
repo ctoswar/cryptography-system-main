@@ -45,6 +45,7 @@ never orphaning data).
 import secrets
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import constant_time, hashes, hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .core import AC3Cipher
@@ -66,7 +67,15 @@ HEADER_SIZE = len(STREAM_MAGIC) + 4 + SALT_SIZE + NONCE_PREFIX_SIZE + 4
 
 _INFO_TEXT = b"ac3x/fips/v1/key"
 _INFO_STREAM = b"ac3x/fips/v1/stream"
+_INFO_COMMIT = b"ac3x/fips/v1/commit"
 _AAD_PREFIX = b"AC3F"
+_COMMIT_SIZE = 16
+
+
+def _hmac_sha256(key: bytes, data: bytes) -> bytes:
+    mac = hmac.HMAC(key, hashes.SHA256())
+    mac.update(data)
+    return mac.finalize()
 
 
 def _aad(key_id_value):
@@ -158,12 +167,22 @@ class FIPSCipher:
             raise TypeError(f"encrypt() expects str, got {type(text).__name__}.")
         nonce = secrets.token_bytes(NONCE_SIZE)
         key = derive_stream(self._master, nonce, _INFO_TEXT, KEY_BYTES)
+        commit_key = derive_stream(self._master, nonce, _INFO_COMMIT, KEY_BYTES)
         kid = key_id(self._master)
         output = AESGCM(key).encrypt(nonce, text.encode("utf-8"), _aad(kid))
-        return encode_text([nonce, output, kid], prefix=TEXT_PREFIX)
+        # Key commitment (Bellare & Hoang 2022, ePrint 2022/268): the GCM tag
+        # alone is not key-committing; appending HMAC(commit_key, N || C)
+        # makes a two-key forgery require an HMAC-SHA256 collision.
+        commit = _hmac_sha256(commit_key, nonce + output)[:_COMMIT_SIZE]
+        return encode_text([nonce, output + commit, kid], prefix=TEXT_PREFIX)
 
     def decrypt(self, token: str) -> str:
         nonce, output, key_id_value = decode_fips(token)
+        if len(output) < TAG_SIZE + _COMMIT_SIZE:
+            raise EnvelopeError(
+                "FIPS output is truncated (missing GCM tag/commitment)."
+            )
+        sealed, commit = output[:-_COMMIT_SIZE], output[-_COMMIT_SIZE:]
         aad = _aad(key_id_value)
         candidates = (
             [self._resolve(key_id_value)]
@@ -174,11 +193,21 @@ class FIPSCipher:
         plain = None
         for master in candidates:
             key = derive_stream(master, nonce, _INFO_TEXT, KEY_BYTES)
+            commit_key = derive_stream(master, nonce, _INFO_COMMIT, KEY_BYTES)
             try:
-                plain = AESGCM(key).decrypt(nonce, output, aad)
-                break
+                plain = AESGCM(key).decrypt(nonce, sealed, aad)
             except InvalidTag as exc:
                 last_error = exc
+                continue
+            # Key commitment: verify the tag binds THIS key's commit key
+            # (closes the GCM non-commitment trade-off — see SPEC §9).
+            expected = _hmac_sha256(commit_key, nonce + sealed)[:_COMMIT_SIZE]
+            if not constant_time.bytes_eq(commit, expected):
+                raise IntegrityError(
+                    "Key commitment failed: ciphertext does not bind to this "
+                    "key (possible partitioning attempt)."
+                )
+            break
         if plain is None:
             raise IntegrityError(
                 "Integrity check failed: ciphertext was modified or the key is wrong."
@@ -226,11 +255,14 @@ class FIPSCipher:
         salt = secrets.token_bytes(SALT_SIZE)
         nonce_prefix = secrets.token_bytes(NONCE_PREFIX_SIZE)
         key = derive_stream(self._master, salt, _INFO_STREAM, KEY_BYTES)
+        commit_key = derive_stream(self._master, salt, _INFO_COMMIT, KEY_BYTES)
         header = (
             STREAM_MAGIC + kid + salt + nonce_prefix
             + chunk_size.to_bytes(4, "big")
         )
         aead = AESGCM(key)
+        committer = hmac.HMAC(commit_key, hashes.SHA256())
+        committer.update(header)
 
         dst.write(header)
         written = len(header)
@@ -251,12 +283,15 @@ class FIPSCipher:
             aad = header + index.to_bytes(8, "big") + bytes([flag])
             sealed = aead.encrypt(nonce, chunk, aad)
             frame = bytes([flag]) + len(sealed).to_bytes(4, "big") + sealed
+            committer.update(frame)
             dst.write(frame)
             written += len(frame)
             index += 1
             if flag == 1:
                 break
-        return written
+        commit = committer.copy().finalize()[:_COMMIT_SIZE]
+        dst.write(commit)
+        return written + _COMMIT_SIZE
 
     def decrypt_stream(self, src, dst) -> int:
         """Decrypt an AC3F stream from `src` into `dst`. Returns bytes written.
@@ -282,7 +317,10 @@ class FIPSCipher:
 
         master = self._resolve(key_id_value)
         key = derive_stream(master, salt, _INFO_STREAM, KEY_BYTES)
+        commit_key = derive_stream(master, salt, _INFO_COMMIT, KEY_BYTES)
         aead = AESGCM(key)
+        committer = hmac.HMAC(commit_key, hashes.SHA256())
+        committer.update(header)
 
         index = 0
         written = 0
@@ -303,6 +341,7 @@ class FIPSCipher:
             if flag == 1 and not TAG_SIZE <= length <= chunk_size + TAG_SIZE:
                 raise EnvelopeError(f"Final frame length {length} exceeds chunk size.")
             sealed = _read_exact(src, length, f"frame {index}")
+            committer.update(frame_header + sealed)
             nonce = nonce_prefix + index.to_bytes(4, "big")
             aad = header + index.to_bytes(8, "big") + bytes([flag])
             try:
@@ -313,8 +352,14 @@ class FIPSCipher:
                     "truncated, spliced, or the key is wrong."
                 ) from exc
             dst.write(chunk)
-            written += len(chunk)
             if flag == 1:
+                commit = _read_exact(src, _COMMIT_SIZE, "stream commitment")
+                expected = committer.copy().finalize()[:_COMMIT_SIZE]
+                if not constant_time.bytes_eq(commit, expected):
+                    raise IntegrityError(
+                        "Stream commitment failed: the transcript does not bind "
+                        "to this key (possible partitioning attempt)."
+                    )
                 if src.read(1):
                     raise EnvelopeError("Data found after the final chunk.")
                 return written

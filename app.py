@@ -240,8 +240,11 @@ def decrypt_message():
         # Integrity/envelope failures are expected outcomes, not server faults.
         logger.warning("decrypt rejected input: %s", exc.__class__.__name__)
         return jsonify({"error": str(exc)}), 400
-    logger.info("decrypt: %d chars in, %d chars out", len(token), len(message))
-    return jsonify({"plaintext": message}), 200
+    detected = ("fips" if token.startswith("AC3F.") else
+                "siv" if token.startswith("AC3S.") else
+                "session" if token.startswith("AC3E.") else "classic")
+    logger.info("decrypt [%s]: %d chars in, %d chars out", detected, len(token), len(message))
+    return jsonify({"plaintext": message, "mode": detected}), 200
 
 
 # --------------------------------------------------------------------------
@@ -266,11 +269,18 @@ def encrypt_file():
     if error:
         return error
     filename, payload = parsed
+    raw_mode = request.form.get("mode", "fips")
+    mode = raw_mode.lower().strip() if isinstance(raw_mode, str) else ""
+    if mode not in {"fips", "classic"}:
+        return (
+            jsonify({"error": f"Unknown mode {raw_mode!r}; expected 'fips' or 'classic'."}),
+            400,
+        )
     try:
-        blob = controller.encrypt_bytes(payload)
+        blob = controller.encrypt_bytes(payload, mode=mode)
     except AC3Error as exc:
         return jsonify({"error": str(exc)}), 400
-    logger.info("encrypt-file: %s (%d -> %d bytes)", filename, len(payload), len(blob))
+    logger.info("encrypt-file [%s]: %s (%d -> %d bytes)", mode, filename, len(payload), len(blob))
     return send_file(
         io.BytesIO(blob),
         mimetype="application/octet-stream",
