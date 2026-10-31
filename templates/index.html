@@ -75,6 +75,14 @@
   input[type="file"] { color: var(--muted); font-size: .9rem; max-width: 100%; }
   .file-result { margin-top: 12px; font-size: .9rem; }
   .file-result a { color: var(--ok); font-weight: 600; }
+  .alg-label {
+    font-size: .8rem; color: var(--muted); display: flex;
+    align-items: center; gap: 6px; white-space: nowrap;
+  }
+  select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 8px; font-size: .82rem; cursor: pointer;
+  }
   footer {
     text-align: center; color: var(--muted); font-size: .8rem;
     padding: 0 16px 32px;
@@ -90,9 +98,17 @@
 
 <main>
   <section class="card">
-    <h2>Text <span class="tag">envelope: AC3X.…</span></h2>
+    <h2>Text <span class="tag">envelopes: AC3F · AC3X · AC3S · AC3E</span></h2>
     <textarea id="plain" placeholder="Type a message to encrypt…"></textarea>
     <div class="row">
+      <label class="alg-label">Mode
+        <select id="mode">
+          <option value="fips" selected>FIPS — AES-256-GCM</option>
+          <option value="classic">Classic — 5-layer thesis scheme</option>
+          <option value="siv">SIV — misuse-resistant</option>
+          <option value="session">Session — X25519</option>
+        </select>
+      </label>
       <button id="btn-enc">Encrypt →</button>
       <button id="btn-dec" class="ghost">← Decrypt</button>
       <button id="btn-swap" class="ghost">Swap ↓↑</button>
@@ -107,6 +123,12 @@
     <h2>Files <span class="tag">streams in constant memory at any size*</span></h2>
     <div class="row">
       <input type="file" id="file-input">
+      <label class="alg-label">Mode
+        <select id="fmode">
+          <option value="fips" selected>FIPS — AES-256-GCM</option>
+          <option value="classic">Classic — thesis scheme</option>
+        </select>
+      </label>
       <button id="btn-fenc">Encrypt file</button>
       <button id="btn-fdec" class="ghost">Decrypt file</button>
       <span id="fstatus" class="status"></span>
@@ -145,9 +167,10 @@ async function encryptText() {
   if (!text) return setStatus($("status"), "Enter a message first.", false);
   $("btn-enc").disabled = true;
   try {
-    const { ciphertext } = await postJSON("/encrypt", { message: text });
+    const mode = $("mode").value;
+    const { ciphertext } = await postJSON("/encrypt", { message: text, mode });
     $("output").textContent = ciphertext;
-    setStatus($("status"), `Encrypted ✓ (${ciphertext.length} chars)`, true);
+    setStatus($("status"), `Encrypted ✓ [${mode.toUpperCase()}] (${ciphertext.length} chars)`, true);
   } catch (e) {
     setStatus($("status"), e.message, false);
   } finally {
@@ -160,9 +183,9 @@ async function decryptText() {
   if (!token) return setStatus($("status"), "Paste a ciphertext first.", false);
   $("btn-dec").disabled = true;
   try {
-    const { plaintext } = await postJSON("/decrypt", { ciphertext: token });
+    const { plaintext, mode } = await postJSON("/decrypt", { ciphertext: token });
     $("output").textContent = plaintext;
-    setStatus($("status"), "Decrypted ✓", true);
+    setStatus($("status"), `Decrypted ✓ [${(mode || "?").toUpperCase()}]`, true);
   } catch (e) {
     setStatus($("status"), e.message, false);
   } finally {
@@ -205,6 +228,7 @@ async function fileOp(action, button) {
   try {
     const form = new FormData();
     form.append("file", file, file.name);
+    form.append("mode", $("fmode").value);
     const res = await fetch("/" + action, { method: "POST", body: form });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));

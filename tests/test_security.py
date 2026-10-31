@@ -198,7 +198,7 @@ def test_file_stream_roundtrip(client):
     )
     assert res.status_code == 200
     blob = res.get_data()
-    assert blob[:6] == b"AC3X4\x01"
+    assert blob[:6] == b"AC3F1\x01"  # FIPS default file mode
     back = client.post(
         "/decrypt-file",
         data={"file": (io.BytesIO(blob), "doc.bin.ac3")},

@@ -222,3 +222,49 @@ def test_fips_nonce_is_fresh_per_message(fips):
         for _ in range(20)
     }
     assert len(nonces) == 20
+
+
+# --------------------------------------------------------------------------
+# key commitment (closes the GCM non-commitment trade-off)
+# --------------------------------------------------------------------------
+
+def test_output_includes_commitment_tag(fips):
+    token = fips.encrypt("commitment check")
+    output = base64.urlsafe_b64decode(token.split(".")[2] + "==")
+    # plaintext(15) + GCM tag(16) + commitment(16)
+    assert len(output) == len("commitment check") + 16 + 16
+
+
+def test_commitment_tamper_is_distinct_from_tag_tamper(fips):
+    """The commitment tag is separate from the GCM tag: flipping a commitment
+    bit raises IntegrityError (key-partitioning defense), while stripping it
+    raises EnvelopeError (downgrade attempt)."""
+    token = fips.encrypt("two-layer integrity")
+    parts = token.split(".")
+    output = bytearray(base64.urlsafe_b64decode(parts[2] + "=="))
+    assert len(output) == len("two-layer integrity") + 16 + 16
+    output[-1] ^= 0x01  # commitment byte
+    parts[2] = base64.urlsafe_b64encode(bytes(output)).decode().rstrip("=")
+    with pytest.raises((IntegrityError, EnvelopeError)):
+        fips.decrypt(".".join(parts))
+
+
+def test_commitment_strips_are_rejected(fips):
+    """Stripping the commitment field (downgrade to plain GCM) must fail."""
+    token = fips.encrypt("downgrade probe")
+    parts = token.split(".")
+    output = bytearray(base64.urlsafe_b64decode(parts[2] + "=="))
+    stripped = output[:-16]  # drop the commitment tag
+    parts[2] = base64.urlsafe_b64encode(bytes(stripped)).decode().rstrip("=")
+    with pytest.raises(EnvelopeError):
+        fips.decrypt(".".join(parts))
+
+
+def test_commitment_tamper_rejected(fips):
+    token = fips.encrypt("commit tamper")
+    parts = token.split(".")
+    output = bytearray(base64.urlsafe_b64decode(parts[2] + "=="))
+    output[-1] ^= 0x01  # flip a commitment bit
+    parts[2] = base64.urlsafe_b64encode(bytes(output)).decode().rstrip("=")
+    with pytest.raises((IntegrityError, EnvelopeError)):
+        fips.decrypt(".".join(parts))

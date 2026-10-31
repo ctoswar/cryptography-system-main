@@ -107,12 +107,28 @@ class CMainController:
 
     # -- bytes ---------------------------------------------------------------
 
-    def encrypt_bytes(self, data: bytes, chunk_size: int | None = None) -> bytes:
-        if chunk_size is not None:
-            return self._cipher.encrypt_bytes(data, chunk_size=chunk_size)
-        return self._cipher.encrypt_bytes(data)
+    def encrypt_bytes(self, data: bytes, mode: str = "fips",
+                      chunk_size: int | None = None) -> bytes:
+        """Encrypt binary data with the chunked stream format (mode-routed)."""
+        if mode == "fips":
+            if chunk_size is not None:
+                return self._fips.encrypt_bytes(data, chunk_size=chunk_size)
+            return self._fips.encrypt_bytes(data)
+        if mode == "classic":
+            if chunk_size is not None:
+                return self._cipher.encrypt_bytes(data, chunk_size=chunk_size)
+            return self._cipher.encrypt_bytes(data)
+        raise AC3Error(
+            f"Mode {mode!r} is text-only; use 'fips' or 'classic' for bytes."
+        )
 
     def decrypt_bytes(self, blob: bytes) -> bytes:
+        """Auto-detecting decrypt: the stream magic selects the mode."""
+        import io
+
+        probe = bytes(blob[:6]) if isinstance(blob, (bytes, bytearray, memoryview)) else b""
+        if probe == b"AC3F1\x01":
+            return self._fips.decrypt_bytes(blob)
         return self._cipher.decrypt_bytes(blob)
 
     # -- files ----------------------------------------------------------------

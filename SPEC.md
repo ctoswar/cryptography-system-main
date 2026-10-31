@@ -330,12 +330,16 @@ qualifies. The precise claim: *uses FIPS-approved algorithms in
 NIST-specified modes, structured so a future module validation of the
 primitive layer would cover all cryptographic operations.*
 
-**Documented trade-off - key commitment.** GCM is not key-committing
+**Key commitment (closed in v5.1).** GCM alone is not key-committing
 (Bellare & Hoang 2022, ePrint 2022/268; NDSS 2022 partitioning-oracle
-literature). Classic and SIV modes retain commitment; the FIPS mode trades
-it for maximal algorithmic standardness. SP 800-38D bounds are satisfied:
-per-message/per-stream HKDF-derived keys mean each GCM key encrypts exactly
-one message (or one stream with a 96-bit nonce space).
+literature). AC3-F closes this: a commitment tag
+`HMAC-SHA256(commit_key, nonce || sealed)[:16]` (commit_key = HKDF from
+`ac3x/fips/v1/commit`) is appended to the GCM output (text) or to the stream
+trailer (files), verified in constant time before the plaintext is trusted.
+A ciphertext verifying under two masters now requires an HMAC-SHA256
+collision. SP 800-38D bounds are satisfied: per-message/per-stream
+HKDF-derived keys mean each GCM key encrypts exactly one message (or one
+stream with a 96-bit nonce space).
 
 **AAD binding:** the key ID is inside the GCM AAD - keyid substitution (even
 for a key the deployment knows) fails authentication. Chunk AADs bind the
@@ -343,9 +347,10 @@ full header plus chunk index and flag, so reordering, truncation, splicing,
 flag flips, and trailing data all fail.
 
 **Performance:** GCM fuses authentication into the encryption pass (GHASH,
-hardware-accelerated) - one pass instead of the classic five. Measured:
-387 MB/s encrypt, 532 MB/s decrypt on the reference environment (100 MB
-file, constant ~13 MB memory) - about 2.5x the classic pipeline.
+hardware-accelerated) - one pass instead of the classic five, plus one HMAC
+pass for the commitment. Measured: 242 MB/s encrypt, 328 MB/s decrypt on the
+reference environment (100 MB file, constant memory) - about 1.8x the
+classic pipeline (161-242 MB/s).
 
 **Mode position:** FIPS mode is the production/default layer. The classic
 five-layer pipeline (`AC3X`) remains unchanged as the explicitly-labeled
